@@ -139,7 +139,7 @@ func main() {
 		return consumerTag, nil
 	}
 
-	handlers.OnBasicPublish = func(ctx amqp.ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) error {
+	handlers.OnBasicPublish = func(ctx amqp.ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		// default routing: if exchange empty, deliver to queue named rkey
@@ -158,16 +158,26 @@ func main() {
 					_ = c.writeMeth(c.channel, 60, 60, dar.Bytes())
 					_ = c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
 					_ = c.writeFrm(amqp.Frame{Type: 3, Channel: c.channel, Payload: body})
-					return nil
+					return false, nil
 				}
 				// enqueue
 				q.messages = append(q.messages, append([]byte(nil), body...))
-				return nil
+				return false, nil
 			}
 			// no such queue -> drop
-			return nil
+			return false, nil
 		}
 		// for non-empty exchange default do nothing
+		return false, nil
+	}
+
+	// optional: log client-side nacks/rejects
+	handlers.OnBasicNack = func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error {
+		fmt.Printf("client basic.nack chan=%d tag=%d multiple=%v requeue=%v\n", channel, deliveryTag, multiple, requeue)
+		return nil
+	}
+	handlers.OnBasicReject = func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, requeue bool) error {
+		fmt.Printf("client basic.reject chan=%d tag=%d requeue=%v\n", channel, deliveryTag, requeue)
 		return nil
 	}
 

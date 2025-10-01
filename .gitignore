@@ -13,6 +13,7 @@ coverage.out
 
 # Local go cache used in CI/tests here
 .gocache/
+.modcache/
 
 # Vendored dependencies (uncomment if you vendor dependencies)
 /vendor/

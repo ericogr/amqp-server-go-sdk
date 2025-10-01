@@ -21,12 +21,12 @@ This document lists features from the AMQP 0-9-1 specification (see `doc/amqp0-9
 | Queue (50) | `Bind` / `Bind-Ok` (queue→exchange) | Delegated | Default handler: noop-record | Add full binding semantics and argument handling.
 | Queue (50) | `Purge` / `Purge-Ok` | Missing | Missing | Implement counts and reply.
 | Queue (50) | `Delete` / `Delete-Ok` | Missing | Missing | Implement conditions (if-unused, if-empty).
-| Basic (60) | `Publish` | Partially: parsing + delegation; content is read | Default handler: basic routing for default exchange & queue | Add mandatory/immediate handling, properties parsing, and return behavior.
+| Basic (60) | `Publish` | Partially (parsing + delegation; handler now returns `(nack bool, error)`) | Default handler: basic routing for default exchange & queue | Add mandatory/immediate handling, properties parsing, and return behavior; handler can request server-side `basic.nack` in confirm mode.
 | Basic (60) | `Deliver` (server→client) | SDK supports sending frames; delegated to handlers | Default handler: sends `basic.deliver` to first consumer, enqueues otherwise | Need to honor `redelivered`, `consumer-tag`, `multiple` semantics and consumer-selection rules.
 | Basic (60) | `Consume` / `Consume-Ok` | Delegated | Default handler: registers consumer, delivers queued message | Implement flags (`no-local`, `exclusive`, `no-ack`) properly.
 | Basic (60) | `Get` / `Get-Ok` / `Get-Empty` | Delegated | Default handler: supports simple get semantics | Implement `message-count`, no-ack behavior and edge cases.
 | Basic (60) | `Ack` (publisher confirmations vs. consumer ack) | SDK sends `basic.ack` for publisher confirms (server-side ack) | Default handler acks publisher after delegation | Consumer acks (client→server consumption) not implemented.
-| Basic (60) | `Nack` / `Reject` | Missing | Missing | Implement server-side negative acks and client reject/nack semantics.
+| Basic (60) | `Nack` / `Reject` | Implemented (delegated) | Default server: delegates client Nack/Reject to `ServerHandlers.OnBasicNack` / `OnBasicReject`; server emits `basic.nack` when `OnBasicPublish` returns `nack==true` in confirm mode | Tests added (pkg/amqp): `TestServerDelegatesBasicNackReject`, `TestServePublishConfirmWithNack`.
 | Basic (60) | `Return` (mandatory/immediate) | Missing | Missing | Implement returning unroutable messages to publisher.
 | Basic (60) | `Qos` / `Qos-Ok` | Missing | Missing | Implement prefetch / windowing semantics.
 | Confirm (85) | `Select` / `Select-Ok` | Implemented (SDK enables confirm mode and server replies) | Default server: supports acks for published seq | Missing: full confirm model (multiple, nacks, listeners, resequencing).
@@ -40,3 +40,8 @@ Notes
 - The default server (`cmd/server`) provides a minimal in-memory behavior for demos and tests; it is not a full broker.
 - To reach full spec compliance, each row above marked Missing/Partial needs detailed sub‑tasks and tests driven by the spec.
 
+Recent updates
+- Added delegation for client `basic.nack` / `basic.reject` via `ServerHandlers.OnBasicNack` and `OnBasicReject`.
+- Changed `ServerHandlers.OnBasicPublish` signature to return `(nack bool, error)` so handlers can request server-side `basic.nack` in confirm mode.
+- Updated example server (`cmd/server/main.go`) to use the new signature and added no-op Nack/Reject handlers.
+- Added tests in `pkg/amqp`: `TestServerDelegatesBasicNackReject` and `TestServePublishConfirmWithNack`.

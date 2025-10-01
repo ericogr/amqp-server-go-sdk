@@ -214,14 +214,41 @@ func buildTuneArgs(channelMax uint16, frameMax uint32, heartbeat uint16) []byte 
 
 // Build an ack method args: delivery-tag (longlong) + bit for multiple
 func buildAckArgs(deliveryTag uint64, multiple bool) []byte {
-	var buf bytes.Buffer
-	buf.Write(encodeLongLong(deliveryTag))
-	var b byte
-	if multiple {
-		b = 1
-	}
-	buf.WriteByte(b)
-	return buf.Bytes()
+    var buf bytes.Buffer
+    buf.Write(encodeLongLong(deliveryTag))
+    var b byte
+    if multiple {
+        b = 1
+    }
+    buf.WriteByte(b)
+    return buf.Bytes()
+}
+
+// Build a nack method args: delivery-tag (longlong) + bit for multiple + bit for requeue
+func buildNackArgs(deliveryTag uint64, multiple bool, requeue bool) []byte {
+    var buf bytes.Buffer
+    buf.Write(encodeLongLong(deliveryTag))
+    var b byte
+    if multiple {
+        b |= 1
+    }
+    if requeue {
+        b |= 2
+    }
+    buf.WriteByte(b)
+    return buf.Bytes()
+}
+
+// Build a reject method args: delivery-tag (longlong) + bit for requeue
+func buildRejectArgs(deliveryTag uint64, requeue bool) []byte {
+    var buf bytes.Buffer
+    buf.Write(encodeLongLong(deliveryTag))
+    var b byte
+    if requeue {
+        b = 1
+    }
+    buf.WriteByte(b)
+    return buf.Bytes()
 }
 
 // Build a content header frame payload for classID and bodySize. properties are omitted.
@@ -249,12 +276,17 @@ type ConnContext struct {
 
 // ServerHandlers allows the server application to handle protocol operations
 type ServerHandlers struct {
-	OnExchangeDeclare func(ctx ConnContext, channel uint16, exchange, kind string, args []byte) error
-	OnQueueDeclare    func(ctx ConnContext, channel uint16, queue string, args []byte) error
-	OnQueueBind       func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
-	OnBasicConsume    func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
-	OnBasicPublish    func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) error
-	OnBasicGet        func(ctx ConnContext, channel uint16, queue string, noAck bool) (found bool, deliveryTag uint64, body []byte, err error)
+    OnExchangeDeclare func(ctx ConnContext, channel uint16, exchange, kind string, args []byte) error
+    OnQueueDeclare    func(ctx ConnContext, channel uint16, queue string, args []byte) error
+    OnQueueBind       func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
+    OnBasicConsume    func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
+    // OnBasicPublish returns (nack, err). If nack==true and the channel is in confirm mode
+    // the SDK will send a Basic.Nack for the publishing tag.
+    OnBasicPublish    func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (nack bool, err error)
+    OnBasicGet        func(ctx ConnContext, channel uint16, queue string, noAck bool) (found bool, deliveryTag uint64, body []byte, err error)
+    // Incoming client-to-server notifications
+    OnBasicNack       func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error
+    OnBasicReject     func(ctx ConnContext, channel uint16, deliveryTag uint64, requeue bool) error
 }
 
 func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byte) error) error {
@@ -480,12 +512,48 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		if err != nil {
 			return
 		}
-		switch f.Type {
-		case frameMethod:
-			classID, methodID, args, err := ParseMethod(f.Payload)
-			if err != nil {
-				return
+	switch f.Type {
+	case frameMethod:
+		classID, methodID, args, err := ParseMethod(f.Payload)
+		if err != nil {
+			return
+		}
+
+		// handle incoming client Basic.Nack (class 60 method 120)
+		if classID == classBasic && methodID == methodBasicNack {
+			if len(args) < 9 {
+				continue
 			}
+			dtag := binary.BigEndian.Uint64(args[0:8])
+			var multiple bool
+			if len(args) >= 9 && args[8]&1 == 1 {
+				multiple = true
+			}
+			var requeue bool
+			if len(args) >= 9 && args[8]&2 == 2 {
+				requeue = true
+			}
+			if handlers != nil && handlers.OnBasicNack != nil {
+				_ = handlers.OnBasicNack(ctx, f.Channel, dtag, multiple, requeue)
+			}
+			continue
+		}
+
+		// handle incoming client Basic.Reject (class 60 method 90)
+		if classID == classBasic && methodID == methodBasicReject {
+			if len(args) < 9 {
+				continue
+			}
+			dtag := binary.BigEndian.Uint64(args[0:8])
+			var requeue bool
+			if len(args) >= 9 && args[8]&1 == 1 {
+				requeue = true
+			}
+			if handlers != nil && handlers.OnBasicReject != nil {
+				_ = handlers.OnBasicReject(ctx, f.Channel, dtag, requeue)
+			}
+			continue
+		}
 			fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
 			// handle Connection.Close (class 10 method 50)
 			if classID == classConnection && methodID == methodConnClose {
@@ -810,26 +878,37 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					_ = handler(ctx, f.Channel, body.Bytes())
 				}
 
-				// delegate basic.publish processing to handlers if provided
-				if handlers != nil && handlers.OnBasicPublish != nil {
-					if err := handlers.OnBasicPublish(ctx, f.Channel, exch, rkey, hf.Payload, body.Bytes()); err != nil {
-						_ = writeConnectionClose(conn, 504, "basic.publish handler failed", classBasic, methodBasicPublish)
-						return
-					}
-				}
+                // delegate basic.publish processing to handlers if provided
+                var publishNack bool
+                if handlers != nil && handlers.OnBasicPublish != nil {
+                    nack, err := handlers.OnBasicPublish(ctx, f.Channel, exch, rkey, hf.Payload, body.Bytes())
+                    if err != nil {
+                        _ = writeConnectionClose(conn, 504, "basic.publish handler failed", classBasic, methodBasicPublish)
+                        return
+                    }
+                    publishNack = nack
+                }
 
 				// determine ack behavior for the publishing channel
 				st, ok := channelStates[f.Channel]
-				if ok && st.confirming {
-					st.publishSeq++
-					tag := st.publishSeq
-					if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(tag, false)); err != nil {
-						fmt.Printf("[server] write basic.ack error: %v\n", err)
-						return
-					}
-					fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.ack, tag=%d)\n", f.Channel, classBasic, methodBasicAck, tag)
-					continue
-				}
+                if ok && st.confirming {
+                    st.publishSeq++
+                    tag := st.publishSeq
+                    if publishNack {
+                        if err := WriteMethod(conn, f.Channel, classBasic, methodBasicNack, buildNackArgs(tag, false, false)); err != nil {
+                            fmt.Printf("[server] write basic.nack error: %v\n", err)
+                            return
+                        }
+                        fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.nack, tag=%d)\n", f.Channel, classBasic, methodBasicNack, tag)
+                    } else {
+                        if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(tag, false)); err != nil {
+                            fmt.Printf("[server] write basic.ack error: %v\n", err)
+                            return
+                        }
+                        fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.ack, tag=%d)\n", f.Channel, classBasic, methodBasicAck, tag)
+                    }
+                    continue
+                }
 
 				// backwards-compatible behavior: when not in confirm mode send an ack with tag 1
 				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(1, false)); err != nil {
