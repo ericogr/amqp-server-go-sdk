@@ -1,47 +1,44 @@
-# TODO / Compatibility Checklist
 
-This document lists features from the AMQP 0-9-1 specification (see `doc/amqp0-9-1.extended.xml`) and the current implementation status in `pkg/amqp` and the example server (`cmd/server`). The SDK intentionally parses the wire protocol and delegates behavioral decisions to application-provided handlers (`ServerHandlers`). Use this checklist to track work required for fuller spec compliance.
+## TODO / Compatibility Checklist
 
-| Area (class) | Method(s) / Feature | Status (SDK) | Status (default server) | Notes / Action Required |
-|---|---|---:|---|---|
-| Connection (10) | `Start` / `Start-Ok` | Implemented (handshake & PLAIN parsing) | n/a | PLAIN auth delegated via AuthHandler; OK.
-| Connection (10) | `Tune` / `Tune-Ok` | Implemented | n/a | Basic tune exchange implemented.
-| Connection (10) | `Open` / `Open-Ok` | Implemented | n/a | OK.
-| Connection (10) | `Close` / `Close-Ok` | Implemented | n/a | OK.
-| Connection (10) | `Secure` / `Secure-Ok` (SASL challenge) | Missing | Missing | Add SASL challenge flow if needed.
-| Connection (10) | `Blocked` / `Unblocked` | Missing | Missing | Implement notifications and allow handlers to react.
-| Connection (10) | `Update-Secret` | Missing | Missing | Optional (OAuth-like) support.
-| Channel (20) | `Open` / `Open-Ok` | Implemented | n/a | OK.
-| Channel (20) | `Close` / `Close-Ok` | Implemented | n/a | OK.
-| Channel (20) | `Flow` / `Flow-Ok` (flow control) | Missing | Missing | Requires handler support to pause/resume publishers/consumers.
-| Exchange (40) | `Declare` / `Declare-Ok` | Delegated to handlers | Default handler: record existence (minimal) | Need full argument parsing, passive/if-unused, durable, auto-delete semantics.
-| Exchange (40) | `Delete` / `Delete-Ok` | Implemented (delegated) | Default server: removes exchange from in-memory map; delegates to `ServerHandlers.OnExchangeDelete` (handler receives `if-unused`/`nowait` flags) | Tests added (pkg/amqp): `TestServerDelegatesExchangeQueueDelete`.
-| Exchange (40) | `Bind` / `Bind-Ok` (exchange→exchange) | Missing / Delegated | Missing | Complex; implement binding storage and routing logic.
-| Queue (50) | `Declare` / `Declare-Ok` | Delegated to handlers | Default handler: create minimal queue state | Implement passive, durable, exclusive, auto-delete, arguments.
-| Queue (50) | `Bind` / `Bind-Ok` (queue→exchange) | Delegated | Default handler: noop-record | Add full binding semantics and argument handling.
-| Queue (50) | `Purge` / `Purge-Ok` | Implemented (delegated) | Default server: `OnQueuePurge` removes messages from in-memory queue and returns count; SDK delegates to `ServerHandlers.OnQueuePurge` | Tests added (pkg/amqp): `TestServerDelegatesQueuePurge`.
-| Queue (50) | `Delete` / `Delete-Ok` | Implemented (delegated) | Default server: removes queue from in-memory state; delegates to `ServerHandlers.OnQueueDelete` which returns the number of messages deleted; handler receives `if-unused`/`if-empty`/`nowait` flags | Tests added (pkg/amqp): `TestServerDelegatesExchangeQueueDelete`.
-| Basic (60) | `Publish` | Partially (parsing + delegation; handler now returns `(nack bool, error)`) | Default handler: basic routing for default exchange & queue | Add mandatory/immediate handling, properties parsing, and return behavior; handler can request server-side `basic.nack` in confirm mode.
-| Basic (60) | `Deliver` (server→client) | SDK supports sending frames; delegated to handlers | Default handler: sends `basic.deliver` to first consumer, enqueues otherwise | Need to honor `redelivered`, `consumer-tag`, `multiple` semantics and consumer-selection rules.
-| Basic (60) | `Consume` / `Consume-Ok` | Delegated | Default handler: registers consumer, delivers queued message | Implement flags (`no-local`, `exclusive`, `no-ack`) properly.
-| Basic (60) | `Get` / `Get-Ok` / `Get-Empty` | Delegated | Default handler: supports simple get semantics | Implement `message-count`, no-ack behavior and edge cases.
-| Basic (60) | `Ack` (publisher confirmations vs. consumer ack) | SDK sends `basic.ack` for publisher confirms (server-side ack) | Default handler acks publisher after delegation | Consumer acks (client→server consumption) not implemented.
-| Basic (60) | `Nack` / `Reject` | Implemented (delegated) | Default server: delegates client Nack/Reject to `ServerHandlers.OnBasicNack` / `OnBasicReject`; server emits `basic.nack` when `OnBasicPublish` returns `nack==true` in confirm mode | Tests added (pkg/amqp): `TestServerDelegatesBasicNackReject`, `TestServePublishConfirmWithNack`.
-| Basic (60) | `Return` (mandatory/immediate) | Missing | Missing | Implement returning unroutable messages to publisher.
-| Basic (60) | `Qos` / `Qos-Ok` | Missing | Missing | Implement prefetch / windowing semantics.
-| Confirm (85) | `Select` / `Select-Ok` | Implemented (SDK enables confirm mode and server replies) | Default server: supports acks for published seq | Missing: full confirm model (multiple, nacks, listeners, resequencing).
-| Tx (90) | `Select` / `Commit` / `Rollback` | Missing | Missing | Transactions not supported.
-| Content properties | Content header properties & field-table | Partial: only `body-size` parsed and encoded; field-table stubbed | Default server ignores properties/arguments | Implement full property flags and field-table (maps, types) parsing & encoding.
-| Error handling | Specified reply-codes and exceptions | Partial | Partial | Many reply-codes and synchronous error rules not exhaustively implemented.
-| Misc | Heartbeats | Frame type recognized; heartbeat handling minimal | Minimal | Implement proper heartbeat detection and peer liveness.
+This document lists AMQP 0-9-1 areas and features and the current implementation
+status in the SDK (`pkg/amqp`). The table below shows, for each feature, a simple
+status value and a short inline note describing the current state when relevant.
 
-Notes
-- "Delegated" means the SDK parses the wire protocol and calls the function in `ServerHandlers`.
-- The default server (`cmd/server`) provides a minimal in-memory behavior for demos and tests; it is not a full broker.
-- To reach full spec compliance, each row above marked Missing/Partial needs detailed sub‑tasks and tests driven by the spec.
+| Area (class) | Feature | Status | Note |
+|---|---|---:|---|
+| Connection (10) | `Start` / `Start-Ok` | Implemented | Handshake and PLAIN auth supported; `Start-Ok` parsed.
+| Connection (10) | `Tune` / `Tune-Ok` | Implemented | Basic Tune exchange implemented.
+| Connection (10) | `Open` / `Open-Ok` (vhost) | Implemented | `vhost` is parsed and available on `ConnContext.Vhost`.
+| Connection (10) | `Close` / `Close-Ok` | Implemented | Connection.Close/-Ok supported.
+| Connection (10) | `Secure` / `Secure-Ok` (SASL challenge) | Not implemented | SASL challenge flow not supported.
+| Connection (10) | `Blocked` / `Unblocked` | Not implemented | Connection.blocked/unblocked notifications not implemented.
+| Connection (10) | `Update-Secret` | Not implemented | Optional feature not supported.
+| Channel (20) | `Open` / `Open-Ok` | Implemented | Channel open/ok supported.
+| Channel (20) | `Close` / `Close-Ok` | Implemented | Channel close/ok supported.
+| Channel (20) | `Flow` / `Flow-Ok` | Not implemented | Flow control not implemented.
+| Exchange (40) | `Declare` / `Declare-Ok` | Implemented | Delegated to `ServerHandlers.OnExchangeDeclare` (args passed to handler).
+| Exchange (40) | `Delete` / `Delete-Ok` | Implemented | Delegated to `ServerHandlers.OnExchangeDelete`; flags (`if-unused`,`nowait`) parsed; `nowait` suppresses reply.
+| Exchange (40) | `Bind` / `Bind-Ok` | Not implemented | Exchange-to-exchange bindings not stored/routed.
+| Queue (50) | `Declare` / `Declare-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueDeclare`; `declare-ok` includes name and counters (currently zeros).
+| Queue (50) | `Bind` / `Bind-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueBind`.
+| Queue (50) | `Purge` / `Purge-Ok` | Implemented | Delegated to `ServerHandlers.OnQueuePurge`; `purge-ok` includes `message-count` returned by handler.
+| Queue (50) | `Delete` / `Delete-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueDelete`; flags (`if-unused`,`if-empty`,`nowait`) parsed; handler returns deleted message-count which is included in `delete-ok`.
+| Basic (60) | `Publish` | Partial | Parsing and delegation implemented; `OnBasicPublish` returns `(nack bool, error)` and confirm-mode ack/nack is sent; limited handling of properties/mandatory/return.
+| Basic (60) | `Deliver` (server→client) | Implemented | SDK sends `basic.deliver` frames; delivery behavior is the responsibility of the handler.
+| Basic (60) | `Consume` / `Consume-Ok` | Implemented | Delegated to `ServerHandlers.OnBasicConsume`; `consume-ok` is sent.
+| Basic (60) | `Get` / `Get-Ok` / `Get-Empty` | Implemented | Delegated to `ServerHandlers.OnBasicGet`.
+| Basic (60) | `Ack` (consumer→server ack) | Not implemented | Consumer acknowledgements (client→server) for consumption are not delegated; SDK uses acks for publisher confirms.
+| Basic (60) | `Nack` / `Reject` | Implemented | Client notifications delegated via `OnBasicNack`/`OnBasicReject`; server can send `basic.nack` for publishes based on handler.
+| Basic (60) | `Return` (mandatory/immediate) | Not implemented | Returning unroutable messages to publisher not implemented.
+| Basic (60) | `Qos` / `Qos-Ok` | Not implemented | Prefetch/QoS not implemented.
+| Confirm (85) | `Select` / `Select-Ok` | Partial | Basic confirm mode implemented (per-channel sequence, per-publish ack/nack); full confirm model not implemented.
+| Tx (90) | `Select` / `Commit` / `Rollback` | Not implemented | Transactions not supported.
+| Content properties | Content header properties & field-table | Partial | Only `body-size` parsed/serialized; property flags and field-table mostly stubbed.
+| Error handling | Reply-codes & spec errors | Partial | Some reply-codes used; error handling per-spec not exhaustive.
+| Misc | Heartbeats | Partial | Heartbeat frame type recognized; minimal handling.
+| Transport | TLS support | Implemented | `ServeWithListener` accepts TLS listeners; `ConnContext.TLSState` filled after handshake; `make gen-certs` available for local testing.
 
-Recent updates
-- Added delegation for client `basic.nack` / `basic.reject` via `ServerHandlers.OnBasicNack` and `OnBasicReject`.
-- Changed `ServerHandlers.OnBasicPublish` signature to return `(nack bool, error)` so handlers can request server-side `basic.nack` in confirm mode.
-- Updated example server (`cmd/server/main.go`) to use the new signature and added no-op Nack/Reject handlers.
-- Added tests in `pkg/amqp`: `TestServerDelegatesBasicNackReject` and `TestServePublishConfirmWithNack`.
+Use this table to track compatibility progress; update the "Status" column to
+`Implemented`, `Not implemented` or `Partial` and keep the note on the same row
+with relevant details about the current implementation state.
