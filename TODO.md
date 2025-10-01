@@ -22,6 +22,7 @@ status value and a short inline note describing the current state when relevant.
 | Exchange (40) | `Bind` / `Bind-Ok` | Implemented | Delegated to `ServerHandlers.OnExchangeBind`; flags (`nowait`) parsed; `nowait` suppresses reply.
 | Queue (50) | `Declare` / `Declare-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueDeclare`; `declare-ok` includes name and counters (currently zeros).
 | Queue (50) | `Bind` / `Bind-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueBind`.
+| Queue (50) | `Unbind` / `Unbind-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueUnbind`; fields parsed: queue, exchange, routing-key, arguments; `unbind-ok` always sent on success.
 | Queue (50) | `Purge` / `Purge-Ok` | Implemented | Delegated to `ServerHandlers.OnQueuePurge`; `purge-ok` includes `message-count` returned by handler.
 | Queue (50) | `Delete` / `Delete-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueDelete`; flags (`if-unused`,`if-empty`,`nowait`) parsed; handler returns deleted message-count which is included in `delete-ok`.
 | Basic (60) | `Publish` | Partial | Parsing and delegation implemented; `OnBasicPublish` returns `(nack bool, error)` and confirm-mode ack/nack is sent; limited handling of properties/mandatory/return.

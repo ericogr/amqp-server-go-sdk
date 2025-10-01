@@ -65,6 +65,8 @@ const (
 	methodQueueBindOk    = 21
 	methodQueuePurge     = 30
 	methodQueuePurgeOk   = 31
+	methodQueueUnbind    = 50
+	methodQueueUnbindOk  = 51
 	methodQueueDelete    = 40
 	methodQueueDeleteOk  = 41
 
@@ -297,6 +299,7 @@ type ServerHandlers struct {
 	OnQueueDelete  func(ctx ConnContext, channel uint16, queue string, ifUnused bool, ifEmpty bool, nowait bool, args []byte) (int, error)
 	OnQueuePurge   func(ctx ConnContext, channel uint16, queue string, args []byte) (int, error)
 	OnQueueBind    func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
+	OnQueueUnbind  func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
 	OnBasicConsume func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
 	// OnBasicPublish returns (nack, err). If nack==true and the channel is in confirm mode
 	// the SDK will send a Basic.Nack for the publishing tag.
@@ -905,6 +908,50 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueBindOk, []byte{}); err != nil {
 					fmt.Printf("[server] write queue.bind-ok error: %v\n", err)
+					return
+				}
+				continue
+			}
+
+			// queue.unbind (delegate)
+			if classID == classQueue && methodID == methodQueueUnbind {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				qname := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						qname = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				exch := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						exch = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				rkey := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						rkey = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				// arguments (remaining bytes) passed to handler
+				if handlers != nil && handlers.OnQueueUnbind != nil {
+					if err := handlers.OnQueueUnbind(ctx, f.Channel, qname, exch, rkey, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "queue.unbind failed", classQueue, methodQueueUnbind)
+						return
+					}
+				}
+				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueUnbindOk, []byte{}); err != nil {
+					fmt.Printf("[server] write queue.unbind-ok error: %v\n", err)
 					return
 				}
 				continue

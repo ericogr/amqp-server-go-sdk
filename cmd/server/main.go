@@ -158,6 +158,13 @@ func main() {
 		return nil
 	}
 
+	handlers.OnQueueUnbind = func(ctx amqp.ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Printf("queue unbind: %q <- %q key=%q vhost=%q tls=%v\n", queue, exchange, rkey, ctx.Vhost, ctx.TLSState != nil)
+		return nil
+	}
+
 	handlers.OnBasicConsume = func(ctx amqp.ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()

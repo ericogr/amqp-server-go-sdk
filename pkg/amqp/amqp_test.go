@@ -681,6 +681,106 @@ func TestServerDelegatesQueuePurge(t *testing.T) {
 	}
 }
 
+func TestServerDelegatesQueueUnbind(t *testing.T) {
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
+
+	var got bool
+	ch := make(chan struct{}, 1)
+
+	handlers := &ServerHandlers{}
+	handlers.OnQueueUnbind = func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
+		got = true
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
+
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
+
+	// send queue.unbind
+	ubArgs := append(encodeShort(0), encodeShortStr("q1")...)
+	ubArgs = append(ubArgs, encodeShortStr("ex1")...)
+	ubArgs = append(ubArgs, encodeShortStr("rkey")...)
+	if err := WriteMethod(cConn, 1, classQueue, methodQueueUnbind, ubArgs); err != nil {
+		t.Fatalf("write queue.unbind: %v", err)
+	}
+	// read unbind-ok
+	f, err := ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read queue.unbind-ok: %v", err)
+	}
+	ci, mi, _, err := ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse queue.unbind-ok: %v", err)
+	}
+	if ci != classQueue || mi != methodQueueUnbindOk {
+		t.Fatalf("expected queue.unbind-ok got %d:%d", ci, mi)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnQueueUnbind not called")
+	}
+
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
+
+	if !got {
+		t.Fatalf("handler not invoked")
+	}
+}
+
 func TestServePublishConfirmWithNack(t *testing.T) {
 	sConn, cConn := net.Pipe()
 	defer sConn.Close()
