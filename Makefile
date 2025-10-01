@@ -14,7 +14,7 @@ test:
 	go test ./... -v
 
 publish:
-	go run ./cmd/publish --addr amqp://guest:guest@127.0.0.1:$(DEFAULT_PORT)/ --exchange "" --key test --body "hello"
+	go run ./cmd/publish --addr amqp://guest:guest@127.0.0.1:$(DEFAULT_PORT)/ --exchange "" --key test --body "hello" --exchange testx --queue testq --delete-exchange true
 
 clean:
 	rm -f server

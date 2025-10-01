@@ -15,12 +15,12 @@ This document lists features from the AMQP 0-9-1 specification (see `doc/amqp0-9
 | Channel (20) | `Close` / `Close-Ok` | Implemented | n/a | OK.
 | Channel (20) | `Flow` / `Flow-Ok` (flow control) | Missing | Missing | Requires handler support to pause/resume publishers/consumers.
 | Exchange (40) | `Declare` / `Declare-Ok` | Delegated to handlers | Default handler: record existence (minimal) | Need full argument parsing, passive/if-unused, durable, auto-delete semantics.
-| Exchange (40) | `Delete` / `Delete-Ok` | Missing / Delegated | Missing | Implement and delegate deletion rules and reply-codes.
+| Exchange (40) | `Delete` / `Delete-Ok` | Implemented (delegated) | Default server: removes exchange from in-memory map; delegates to `ServerHandlers.OnExchangeDelete` | Tests added (pkg/amqp): `TestServerDelegatesExchangeQueueDelete`.
 | Exchange (40) | `Bind` / `Bind-Ok` (exchange→exchange) | Missing / Delegated | Missing | Complex; implement binding storage and routing logic.
 | Queue (50) | `Declare` / `Declare-Ok` | Delegated to handlers | Default handler: create minimal queue state | Implement passive, durable, exclusive, auto-delete, arguments.
 | Queue (50) | `Bind` / `Bind-Ok` (queue→exchange) | Delegated | Default handler: noop-record | Add full binding semantics and argument handling.
 | Queue (50) | `Purge` / `Purge-Ok` | Missing | Missing | Implement counts and reply.
-| Queue (50) | `Delete` / `Delete-Ok` | Missing | Missing | Implement conditions (if-unused, if-empty).
+| Queue (50) | `Delete` / `Delete-Ok` | Implemented (delegated) | Default server: removes queue from in-memory state; delegates to `ServerHandlers.OnQueueDelete` | Tests added (pkg/amqp): `TestServerDelegatesExchangeQueueDelete`.
 | Basic (60) | `Publish` | Partially (parsing + delegation; handler now returns `(nack bool, error)`) | Default handler: basic routing for default exchange & queue | Add mandatory/immediate handling, properties parsing, and return behavior; handler can request server-side `basic.nack` in confirm mode.
 | Basic (60) | `Deliver` (server→client) | SDK supports sending frames; delegated to handlers | Default handler: sends `basic.deliver` to first consumer, enqueues otherwise | Need to honor `redelivered`, `consumer-tag`, `multiple` semantics and consumer-selection rules.
 | Basic (60) | `Consume` / `Consume-Ok` | Delegated | Default handler: registers consumer, delivers queued message | Implement flags (`no-local`, `exclusive`, `no-ack`) properly.

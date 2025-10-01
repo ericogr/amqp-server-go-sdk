@@ -86,6 +86,14 @@ func main() {
 		return nil
 	}
 
+	handlers.OnExchangeDelete = func(ctx amqp.ConnContext, channel uint16, exchange string, args []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		delete(exchanges, exchange)
+		fmt.Printf("exchange deleted: %q\n", exchange)
+		return nil
+	}
+
 	handlers.OnQueueDeclare = func(ctx amqp.ConnContext, channel uint16, queue string, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
@@ -93,6 +101,14 @@ func main() {
 			queues[queue] = &queueState{name: queue, messages: make([][]byte, 0), consumers: make([]*consumer, 0), nextDeliveryTag: 0}
 		}
 		fmt.Printf("queue declared: %q\n", queue)
+		return nil
+	}
+
+	handlers.OnQueueDelete = func(ctx amqp.ConnContext, channel uint16, queue string, args []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		delete(queues, queue)
+		fmt.Printf("queue deleted: %q\n", queue)
 		return nil
 	}
 

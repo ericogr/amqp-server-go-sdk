@@ -16,6 +16,8 @@ func main() {
 	key := flag.String("key", "test", "routing key")
 	queue := flag.String("queue", "test-queue", "queue name")
 	body := flag.String("body", "hello", "message body")
+	deleteExchange := flag.Bool("delete-exchange", false, "delete exchange after publish")
+	deleteQueue := flag.Bool("delete-queue", false, "delete queue after publish")
 	flag.Parse()
 
 	conn, err := amqp091.Dial(*addr)
@@ -85,5 +87,21 @@ func main() {
 		fmt.Println("published and confirmed")
 	} else {
 		log.Fatalf("publish was not acknowledged or timed out")
+	}
+
+	// optionally delete exchange / queue as a demo of server delete handling
+	if *deleteExchange && *exchange != "" {
+		if err := ch.ExchangeDelete(*exchange, false, false); err != nil {
+			log.Printf("exchange delete: %v", err)
+		} else {
+			fmt.Println("exchange deleted")
+		}
+	}
+	if *deleteQueue && *queue != "" {
+		if _, err := ch.QueueDelete(*queue, false, false, false); err != nil {
+			log.Printf("queue delete: %v", err)
+		} else {
+			fmt.Println("queue deleted")
+		}
 	}
 }

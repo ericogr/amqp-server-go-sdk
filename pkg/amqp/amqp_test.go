@@ -48,251 +48,381 @@ func TestFrameRoundtrip(t *testing.T) {
 }
 
 func TestServerDelegatesBasicNackReject(t *testing.T) {
-    sConn, cConn := net.Pipe()
-    defer sConn.Close()
-    defer cConn.Close()
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
 
-    var gotNack, gotReject bool
-    nackCh := make(chan struct{}, 1)
-    rejCh := make(chan struct{}, 1)
+	var gotNack, gotReject bool
+	nackCh := make(chan struct{}, 1)
+	rejCh := make(chan struct{}, 1)
 
-    handlers := &ServerHandlers{}
-    handlers.OnBasicNack = func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error {
-        gotNack = true
-        select {
-        case nackCh <- struct{}{}:
-        default:
-        }
-        return nil
-    }
-    handlers.OnBasicReject = func(ctx ConnContext, channel uint16, deliveryTag uint64, requeue bool) error {
-        gotReject = true
-        select {
-        case rejCh <- struct{}{}:
-        default:
-        }
-        return nil
-    }
+	handlers := &ServerHandlers{}
+	handlers.OnBasicNack = func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error {
+		gotNack = true
+		select {
+		case nackCh <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	handlers.OnBasicReject = func(ctx ConnContext, channel uint16, deliveryTag uint64, requeue bool) error {
+		gotReject = true
+		select {
+		case rejCh <- struct{}{}:
+		default:
+		}
+		return nil
+	}
 
-    done := make(chan struct{})
-    go func() {
-        handleConnWithAuth(sConn, nil, nil, handlers)
-        close(done)
-    }()
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
 
-    // handshake + open channel
-    hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
-    if _, err := cConn.Write(hdr); err != nil {
-        t.Fatalf("write header: %v", err)
-    }
-    if f, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read start: %v", err)
-    } else {
-        if _, _, _, err := ParseMethod(f.Payload); err != nil {
-            t.Fatalf("parse start: %v", err)
-        }
-    }
-    if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
-        t.Fatalf("write start-ok: %v", err)
-    }
-    if f, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read tune: %v", err)
-    } else {
-        if _, _, _, err := ParseMethod(f.Payload); err != nil {
-            t.Fatalf("parse tune: %v", err)
-        }
-    }
-    if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
-        t.Fatalf("write tune-ok: %v", err)
-    }
-    if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
-        t.Fatalf("write open: %v", err)
-    }
-    if _, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read open-ok: %v", err)
-    }
-    // open channel
-    if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
-        t.Fatalf("write channel.open: %v", err)
-    }
-    if _, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read channel.open-ok: %v", err)
-    }
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	// open channel
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
 
-    // send basic.nack and basic.reject from client -> server
-    if err := WriteMethod(cConn, 1, classBasic, methodBasicNack, buildNackArgs(42, true, false)); err != nil {
-        t.Fatalf("write basic.nack: %v", err)
-    }
-    if err := WriteMethod(cConn, 1, classBasic, methodBasicReject, buildRejectArgs(43, true)); err != nil {
-        t.Fatalf("write basic.reject: %v", err)
-    }
+	// send basic.nack and basic.reject from client -> server
+	if err := WriteMethod(cConn, 1, classBasic, methodBasicNack, buildNackArgs(42, true, false)); err != nil {
+		t.Fatalf("write basic.nack: %v", err)
+	}
+	if err := WriteMethod(cConn, 1, classBasic, methodBasicReject, buildRejectArgs(43, true)); err != nil {
+		t.Fatalf("write basic.reject: %v", err)
+	}
 
-    // wait for handlers to be invoked
-    select {
-    case <-nackCh:
-    case <-time.After(500 * time.Millisecond):
-        t.Fatalf("OnBasicNack not called")
-    }
-    select {
-    case <-rejCh:
-    case <-time.After(500 * time.Millisecond):
-        t.Fatalf("OnBasicReject not called")
-    }
+	// wait for handlers to be invoked
+	select {
+	case <-nackCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnBasicNack not called")
+	}
+	select {
+	case <-rejCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnBasicReject not called")
+	}
 
-    cConn.Close()
-    select {
-    case <-done:
-    case <-time.After(2 * time.Second):
-        t.Fatalf("server did not exit")
-    }
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
 
-    if !gotNack || !gotReject {
-        t.Fatalf("handlers not invoked gotNack=%v gotReject=%v", gotNack, gotReject)
-    }
+	if !gotNack || !gotReject {
+		t.Fatalf("handlers not invoked gotNack=%v gotReject=%v", gotNack, gotReject)
+	}
+}
+
+func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
+
+	var gotEx, gotQ bool
+	exCh := make(chan struct{}, 1)
+	qCh := make(chan struct{}, 1)
+
+	handlers := &ServerHandlers{}
+	handlers.OnExchangeDelete = func(ctx ConnContext, channel uint16, exchange string, args []byte) error {
+		gotEx = true
+		select {
+		case exCh <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	handlers.OnQueueDelete = func(ctx ConnContext, channel uint16, queue string, args []byte) error {
+		gotQ = true
+		select {
+		case qCh <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
+
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	// open channel
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
+
+	// send exchange.delete
+	if err := WriteMethod(cConn, 1, classExchange, methodExchangeDelete, append(encodeShort(0), encodeShortStr("ex1")...)); err != nil {
+		t.Fatalf("write exchange.delete: %v", err)
+	}
+	// read delete-ok
+	f, err := ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read exchange.delete-ok: %v", err)
+	}
+	ci, mi, _, err := ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse exchange.delete-ok: %v", err)
+	}
+	if ci != classExchange || mi != methodExchangeDeleteOk {
+		t.Fatalf("expected exchange.delete-ok got %d:%d", ci, mi)
+	}
+
+	// send queue.delete
+	if err := WriteMethod(cConn, 1, classQueue, methodQueueDelete, append(encodeShort(0), encodeShortStr("q1")...)); err != nil {
+		t.Fatalf("write queue.delete: %v", err)
+	}
+	// read delete-ok
+	f, err = ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read queue.delete-ok: %v", err)
+	}
+	ci, mi, _, err = ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse queue.delete-ok: %v", err)
+	}
+	if ci != classQueue || mi != methodQueueDeleteOk {
+		t.Fatalf("expected queue.delete-ok got %d:%d", ci, mi)
+	}
+
+	// wait for handlers to be invoked
+	select {
+	case <-exCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnExchangeDelete not called")
+	}
+	select {
+	case <-qCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnQueueDelete not called")
+	}
+
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
+
+	if !gotEx || !gotQ {
+		t.Fatalf("handlers not invoked gotEx=%v gotQ=%v", gotEx, gotQ)
+	}
 }
 
 func TestServePublishConfirmWithNack(t *testing.T) {
-    sConn, cConn := net.Pipe()
-    defer sConn.Close()
-    defer cConn.Close()
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
 
-    handlers := &ServerHandlers{}
-    handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
-        if string(body) == "nack-me" {
-            return true, nil
-        }
-        return false, nil
-    }
+	handlers := &ServerHandlers{}
+	handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+		if string(body) == "nack-me" {
+			return true, nil
+		}
+		return false, nil
+	}
 
-    done := make(chan struct{})
-    go func() {
-        handleConnWithAuth(sConn, nil, nil, handlers)
-        close(done)
-    }()
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
 
-    // handshake + open channel
-    hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
-    if _, err := cConn.Write(hdr); err != nil {
-        t.Fatalf("write header: %v", err)
-    }
-    if f, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read start: %v", err)
-    } else {
-        if _, _, _, err := ParseMethod(f.Payload); err != nil {
-            t.Fatalf("parse start: %v", err)
-        }
-    }
-    if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
-        t.Fatalf("write start-ok: %v", err)
-    }
-    if f, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read tune: %v", err)
-    } else {
-        if _, _, _, err := ParseMethod(f.Payload); err != nil {
-            t.Fatalf("parse tune: %v", err)
-        }
-    }
-    if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
-        t.Fatalf("write tune-ok: %v", err)
-    }
-    if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
-        t.Fatalf("write open: %v", err)
-    }
-    if _, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read open-ok: %v", err)
-    }
-    // open channel
-    if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
-        t.Fatalf("write channel.open: %v", err)
-    }
-    if _, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read channel.open-ok: %v", err)
-    }
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	// open channel
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
 
-    // enable confirm mode
-    if err := WriteMethod(cConn, 1, classConfirm, methodConfirmSelect, []byte{}); err != nil {
-        t.Fatalf("write confirm.select: %v", err)
-    }
-    if f, err := ReadFrame(cConn); err != nil {
-        t.Fatalf("read confirm.select-ok: %v", err)
-    } else {
-        ci, mi, _, err := ParseMethod(f.Payload)
-        if err != nil {
-            t.Fatalf("parse confirm.select-ok: %v", err)
-        }
-        if ci != classConfirm || mi != methodConfirmSelectOk {
-            t.Fatalf("expected confirm.select-ok got %d:%d", ci, mi)
-        }
-    }
+	// enable confirm mode
+	if err := WriteMethod(cConn, 1, classConfirm, methodConfirmSelect, []byte{}); err != nil {
+		t.Fatalf("write confirm.select: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read confirm.select-ok: %v", err)
+	} else {
+		ci, mi, _, err := ParseMethod(f.Payload)
+		if err != nil {
+			t.Fatalf("parse confirm.select-ok: %v", err)
+		}
+		if ci != classConfirm || mi != methodConfirmSelectOk {
+			t.Fatalf("expected confirm.select-ok got %d:%d", ci, mi)
+		}
+	}
 
-    // publish ok message
-    body1 := []byte("ok")
-    if err := WriteMethod(cConn, 1, classBasic, methodBasicPublish, []byte{}); err != nil {
-        t.Fatalf("write basic.publish: %v", err)
-    }
-    if err := WriteFrame(cConn, Frame{Type: frameHeader, Channel: 1, Payload: buildContentHeaderPayload(classBasic, uint64(len(body1)))}); err != nil {
-        t.Fatalf("write header: %v", err)
-    }
-    if err := WriteFrame(cConn, Frame{Type: frameBody, Channel: 1, Payload: body1}); err != nil {
-        t.Fatalf("write body: %v", err)
-    }
-    // read ack
-    f, err := ReadFrame(cConn)
-    if err != nil {
-        t.Fatalf("read ack1: %v", err)
-    }
-    ci, mi, args, err := ParseMethod(f.Payload)
-    if err != nil {
-        t.Fatalf("parse ack1: %v", err)
-    }
-    if ci != classBasic || mi != methodBasicAck {
-        t.Fatalf("expected basic.ack got %d:%d", ci, mi)
-    }
-    if len(args) < 8 {
-        t.Fatalf("ack1 args too short")
-    }
-    tag1 := binary.BigEndian.Uint64(args[0:8])
-    if tag1 != 1 {
-        t.Fatalf("expected tag 1 got %d", tag1)
-    }
+	// publish ok message
+	body1 := []byte("ok")
+	if err := WriteMethod(cConn, 1, classBasic, methodBasicPublish, []byte{}); err != nil {
+		t.Fatalf("write basic.publish: %v", err)
+	}
+	if err := WriteFrame(cConn, Frame{Type: frameHeader, Channel: 1, Payload: buildContentHeaderPayload(classBasic, uint64(len(body1)))}); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if err := WriteFrame(cConn, Frame{Type: frameBody, Channel: 1, Payload: body1}); err != nil {
+		t.Fatalf("write body: %v", err)
+	}
+	// read ack
+	f, err := ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read ack1: %v", err)
+	}
+	ci, mi, args, err := ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse ack1: %v", err)
+	}
+	if ci != classBasic || mi != methodBasicAck {
+		t.Fatalf("expected basic.ack got %d:%d", ci, mi)
+	}
+	if len(args) < 8 {
+		t.Fatalf("ack1 args too short")
+	}
+	tag1 := binary.BigEndian.Uint64(args[0:8])
+	if tag1 != 1 {
+		t.Fatalf("expected tag 1 got %d", tag1)
+	}
 
-    // publish nack-me message
-    body2 := []byte("nack-me")
-    if err := WriteMethod(cConn, 1, classBasic, methodBasicPublish, []byte{}); err != nil {
-        t.Fatalf("write basic.publish: %v", err)
-    }
-    if err := WriteFrame(cConn, Frame{Type: frameHeader, Channel: 1, Payload: buildContentHeaderPayload(classBasic, uint64(len(body2)))}); err != nil {
-        t.Fatalf("write header: %v", err)
-    }
-    if err := WriteFrame(cConn, Frame{Type: frameBody, Channel: 1, Payload: body2}); err != nil {
-        t.Fatalf("write body: %v", err)
-    }
-    // read nack
-    f, err = ReadFrame(cConn)
-    if err != nil {
-        t.Fatalf("read nack: %v", err)
-    }
-    ci, mi, args, err = ParseMethod(f.Payload)
-    if err != nil {
-        t.Fatalf("parse nack: %v", err)
-    }
-    if ci != classBasic || mi != methodBasicNack {
-        t.Fatalf("expected basic.nack got %d:%d", ci, mi)
-    }
-    if len(args) < 8 {
-        t.Fatalf("nack args too short")
-    }
-    tag2 := binary.BigEndian.Uint64(args[0:8])
-    if tag2 != 2 {
-        t.Fatalf("expected tag 2 got %d", tag2)
-    }
+	// publish nack-me message
+	body2 := []byte("nack-me")
+	if err := WriteMethod(cConn, 1, classBasic, methodBasicPublish, []byte{}); err != nil {
+		t.Fatalf("write basic.publish: %v", err)
+	}
+	if err := WriteFrame(cConn, Frame{Type: frameHeader, Channel: 1, Payload: buildContentHeaderPayload(classBasic, uint64(len(body2)))}); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if err := WriteFrame(cConn, Frame{Type: frameBody, Channel: 1, Payload: body2}); err != nil {
+		t.Fatalf("write body: %v", err)
+	}
+	// read nack
+	f, err = ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read nack: %v", err)
+	}
+	ci, mi, args, err = ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse nack: %v", err)
+	}
+	if ci != classBasic || mi != methodBasicNack {
+		t.Fatalf("expected basic.nack got %d:%d", ci, mi)
+	}
+	if len(args) < 8 {
+		t.Fatalf("nack args too short")
+	}
+	tag2 := binary.BigEndian.Uint64(args[0:8])
+	if tag2 != 2 {
+		t.Fatalf("expected tag 2 got %d", tag2)
+	}
 
-    cConn.Close()
-    select {
-    case <-done:
-    case <-time.After(2 * time.Second):
-        t.Fatalf("server did not exit")
-    }
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
 }
 
 func TestServePublishConfirmFlow(t *testing.T) {
@@ -713,7 +843,7 @@ func TestQueueDeclareConsumeFlow(t *testing.T) {
 			}
 			return consumerTag, nil
 		}
-	handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if exchange == "" {
@@ -906,7 +1036,7 @@ func TestBasicGetFlow(t *testing.T) {
 			}
 			return nil
 		}
-	handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if exchange == "" {
