@@ -3,8 +3,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
-	"fmt"
-	"log"
+	"os"
+
+	"github.com/rs/zerolog"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
@@ -16,37 +17,39 @@ func main() {
 	insecure := flag.Bool("insecure", true, "skip TLS verify for demo")
 	flag.Parse()
 
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+
 	tlsCfg := &tls.Config{InsecureSkipVerify: *insecure}
 	conn, err := amqp091.DialTLS(*addr, tlsCfg)
 	if err != nil {
-		log.Fatalf("dial: %v", err)
+		logger.Fatal().Err(err).Msg("dial")
 	}
 	defer conn.Close()
 
 	ch, err := conn.Channel()
 	if err != nil {
-		log.Fatalf("channel: %v", err)
+		logger.Fatal().Err(err).Msg("channel")
 	}
 	defer ch.Close()
 
 	// ensure queue exists
 	if _, err := ch.QueueDeclare(*queue, true, false, false, false, nil); err != nil {
-		log.Fatalf("queue declare: %v", err)
+		logger.Fatal().Err(err).Msg("queue declare")
 	}
 
 	msgs, err := ch.Consume(*queue, "", *autoAck, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("consume: %v", err)
+		logger.Fatal().Err(err).Msg("consume")
 	}
 
-	fmt.Printf("consuming from queue %s (autoAck=%v)\n", *queue, *autoAck)
+	logger.Info().Str("queue", *queue).Bool("autoAck", *autoAck).Msg("consuming from queue")
 	for d := range msgs {
-		fmt.Printf("received delivery-tag=%d body=%s\n", d.DeliveryTag, string(d.Body))
+		logger.Info().Uint64("delivery-tag", d.DeliveryTag).Str("body", string(d.Body)).Msg("received delivery")
 		if !*autoAck {
 			if err := d.Ack(false); err != nil {
-				log.Printf("ack failed: %v", err)
+				logger.Error().Err(err).Msg("ack failed")
 			} else {
-				fmt.Printf("acked delivery-tag=%d\n", d.DeliveryTag)
+				logger.Info().Uint64("delivery-tag", d.DeliveryTag).Msg("acked delivery")
 			}
 		}
 	}

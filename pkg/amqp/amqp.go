@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -18,6 +20,16 @@ const (
 	frameHeartbeat = 8
 	frameEnd       = 0xCE
 )
+
+// package logger used for SDK logs. Libraries should default to a no-op
+// logger and let the embedding application configure logging. Use
+// SetLogger to provide an application logger.
+var logger zerolog.Logger = zerolog.Nop()
+
+// SetLogger sets the package logger used by the AMQP SDK. Callers should
+// pass a configured `zerolog.Logger` (for example one created with
+// `zerolog.New(os.Stderr).With().Timestamp().Logger()`).
+func SetLogger(l zerolog.Logger) { logger = l }
 
 // limits and well-known classes/methods
 const (
@@ -441,7 +453,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 	var tlsState *tls.ConnectionState
 	if tc, ok := conn.(*tls.Conn); ok {
 		if err := tc.Handshake(); err != nil {
-			fmt.Printf("[server] tls handshake error: %v\n", err)
+			logger.Error().Err(err).Msg("[server] tls handshake error")
 			return
 		}
 		st := tc.ConnectionState()
@@ -460,7 +472,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 
 	// send Connection.Start (class 10, method 10)
 	if err := WriteMethod(conn, 0, classConnection, methodConnStart, buildStartArgs()); err != nil {
-		fmt.Printf("[server] write start error: %v\n", err)
+		logger.Error().Err(err).Msg("[server] write start error")
 		return
 	}
 
@@ -490,14 +502,14 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		if err != nil {
 			return
 		}
-		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
+		logger.Debug().Msg(fmt.Sprintf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args)))
 		// build connection-scoped context for handlers
 		ctx = ConnContext{Conn: conn, Vhost: vhost, TLSState: connTLSState, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 		if classID == classConnection && methodID == methodConnStartOk {
 			if auth != nil {
 				mech, resp, _, err := parseStartOkArgs(args)
 				if err != nil {
-					fmt.Printf("[server] parse start-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] parse start-ok error")
 					// close with error
 					_ = writeConnectionClose(conn, 540, "Malformed start-ok", 0, 0)
 					return
@@ -512,7 +524,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 
 	// send Tune
 	if err := WriteMethod(conn, 0, classConnection, methodConnTune, buildTuneArgs(0, 131072, 0)); err != nil {
-		fmt.Printf("[server] write tune error: %v\n", err)
+		logger.Error().Err(err).Msg("[server] write tune error")
 		return
 	}
 
@@ -529,7 +541,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		if err != nil {
 			return
 		}
-		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
+		logger.Debug().Msg(fmt.Sprintf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args)))
 		if classID == classConnection && methodID == methodConnTuneOk {
 			break
 		}
@@ -548,7 +560,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		if err != nil {
 			return
 		}
-		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
+		logger.Debug().Msg(fmt.Sprintf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args)))
 		if classID == classConnection && methodID == methodConnOpen {
 			// client requested connection.open
 			// parse virtual-host (path = shortstr)
@@ -559,7 +571,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					vhost = string(args[1 : 1+l])
 				}
 			}
-			fmt.Printf("[server] connection.open vhost=%q\n", vhost)
+			logger.Debug().Msg(fmt.Sprintf("[server] connection.open vhost=%q\n", vhost))
 			// build connection-scoped context for handlers (we now know vhost/TLS)
 			ctx = ConnContext{Conn: conn, Vhost: vhost, TLSState: connTLSState, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 			// if an auth handler was provided, run it now that we know the vhost
@@ -576,10 +588,10 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 			}
 			// connection.open-ok expects a shortstr reserved-1 (empty)
 			if err := WriteMethod(conn, 0, classConnection, methodConnOpenOk, []byte{0}); err != nil {
-				fmt.Printf("[server] write open-ok error: %v\n", err)
+				logger.Error().Err(err).Msg("[server] write open-ok error")
 				return
 			}
-			fmt.Printf("[server] send method chan=0 class=%d method=%d (open-ok)\n", classConnection, methodConnOpenOk)
+			logger.Debug().Msg(fmt.Sprintf("[server] send method chan=0 class=%d method=%d (open-ok)\n", classConnection, methodConnOpenOk))
 			// update connection-scoped context with negotiated vhost
 			ctx = ConnContext{Conn: conn, Vhost: vhost, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 			// clear deadline after handshake
@@ -668,7 +680,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				continue
 			}
-			fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
+			logger.Debug().Msg(fmt.Sprintf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args)))
 			// handle Connection.Close (class 10 method 50)
 			if classID == classConnection && methodID == methodConnClose {
 				// reply-code (short) may be present in args
@@ -676,12 +688,12 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				if len(args) >= 2 {
 					replyCode = binary.BigEndian.Uint16(args[0:2])
 				}
-				fmt.Printf("[server] recv connection.close reply-code=%d args-len=%d\n", replyCode, len(args))
+				logger.Debug().Msg(fmt.Sprintf("[server] recv connection.close reply-code=%d args-len=%d\n", replyCode, len(args)))
 				// respond with Connection.Close-Ok (class 10 method 51) and close connection
 				if err := WriteMethod(conn, 0, classConnection, methodConnCloseOk, []byte{}); err != nil {
-					fmt.Printf("[server] write close-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write close-ok error")
 				}
-				fmt.Printf("[server] send method chan=0 class=%d method=%d (close-ok)\n", classConnection, methodConnCloseOk)
+				logger.Debug().Msg(fmt.Sprintf("[server] send method chan=0 class=%d method=%d (close-ok)\n", classConnection, methodConnCloseOk))
 				return
 			}
 			// channel open
@@ -690,19 +702,19 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				channelStates[f.Channel] = &channelState{confirming: false, publishSeq: 0}
 				// respond with channel.open-ok on same channel (reserved longstr)
 				if err := WriteMethod(conn, f.Channel, classChannel, methodChannelOpenOk, encodeLongStr("")); err != nil {
-					fmt.Printf("[server] write channel.open-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write channel.open-ok error")
 					return
 				}
-				fmt.Printf("[server] send method chan=%d class=%d method=%d (channel.open-ok)\n", f.Channel, classChannel, methodChannelOpenOk)
+				logger.Debug().Msg(fmt.Sprintf("[server] send method chan=%d class=%d method=%d (channel.open-ok)\n", f.Channel, classChannel, methodChannelOpenOk))
 				continue
 			}
 			// channel close: reply with channel.close-ok on same channel
 			if classID == classChannel && methodID == methodChannelClose {
 				if err := WriteMethod(conn, f.Channel, classChannel, methodChannelCloseOk, []byte{}); err != nil {
-					fmt.Printf("[server] write channel.close-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write channel.close-ok error")
 					return
 				}
-				fmt.Printf("[server] send method chan=%d class=%d method=%d (channel.close-ok)\n", f.Channel, classChannel, methodChannelCloseOk)
+				logger.Debug().Msg(fmt.Sprintf("[server] send method chan=%d class=%d method=%d (channel.close-ok)\n", f.Channel, classChannel, methodChannelCloseOk))
 				continue
 			}
 
@@ -736,7 +748,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					}
 				}
 				if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeDeclareOk, []byte{}); err != nil {
-					fmt.Printf("[server] write exchange.declare-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write exchange.declare-ok error")
 					return
 				}
 				continue
@@ -788,7 +800,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				if !nowait {
 					if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeBindOk, []byte{}); err != nil {
-						fmt.Printf("[server] write exchange.bind-ok error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write exchange.bind-ok error")
 						return
 					}
 				}
@@ -840,7 +852,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				if !nowait {
 					if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeUnbindOk, []byte{}); err != nil {
-						fmt.Printf("[server] write exchange.unbind-ok error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write exchange.unbind-ok error")
 						return
 					}
 				}
@@ -881,7 +893,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				if !nowait {
 					if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeDeleteOk, []byte{}); err != nil {
-						fmt.Printf("[server] write exchange.delete-ok error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write exchange.delete-ok error")
 						return
 					}
 				}
@@ -913,7 +925,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				dq.Write(encodeLong(0))
 				dq.Write(encodeLong(0))
 				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueDeclareOk, dq.Bytes()); err != nil {
-					fmt.Printf("[server] write queue.declare-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write queue.declare-ok error")
 					return
 				}
 				continue
@@ -956,7 +968,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					}
 				}
 				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueBindOk, []byte{}); err != nil {
-					fmt.Printf("[server] write queue.bind-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write queue.bind-ok error")
 					return
 				}
 				continue
@@ -1000,7 +1012,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					}
 				}
 				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueUnbindOk, []byte{}); err != nil {
-					fmt.Printf("[server] write queue.unbind-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write queue.unbind-ok error")
 					return
 				}
 				continue
@@ -1031,7 +1043,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				// queue.purge-ok: message-count (long)
 				if err := WriteMethod(conn, f.Channel, classQueue, methodQueuePurgeOk, encodeLong(uint32(msgCount))); err != nil {
-					fmt.Printf("[server] write queue.purge-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write queue.purge-ok error")
 					return
 				}
 				continue
@@ -1079,7 +1091,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				// queue.delete-ok: message-count (long), unless nowait
 				if !nowait {
 					if err := WriteMethod(conn, f.Channel, classQueue, methodQueueDeleteOk, encodeLong(uint32(delCount))); err != nil {
-						fmt.Printf("[server] write queue.delete-ok error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write queue.delete-ok error")
 						return
 					}
 				}
@@ -1127,7 +1139,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					serverTag = fmt.Sprintf("ctag-%d", time.Now().UnixNano())
 				}
 				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicConsumeOk, encodeShortStr(serverTag)); err != nil {
-					fmt.Printf("[server] write basic.consume-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write basic.consume-ok error")
 					return
 				}
 				continue
@@ -1145,10 +1157,10 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				st.publishSeq = 0
 				// respond with select-ok
 				if err := WriteMethod(conn, f.Channel, classConfirm, methodConfirmSelectOk, []byte{}); err != nil {
-					fmt.Printf("[server] write confirm.select-ok error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write confirm.select-ok error")
 					return
 				}
-				fmt.Printf("[server] send method chan=%d class=%d method=%d (confirm.select-ok)\n", f.Channel, classConfirm, methodConfirmSelectOk)
+				logger.Debug().Msg(fmt.Sprintf("[server] send method chan=%d class=%d method=%d (confirm.select-ok)\n", f.Channel, classConfirm, methodConfirmSelectOk))
 				continue
 			}
 
@@ -1175,7 +1187,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					}
 					if !found {
 						if err := WriteMethod(conn, f.Channel, classBasic, methodBasicGetEmpty, []byte{}); err != nil {
-							fmt.Printf("[server] write get-empty error: %v\n", err)
+							logger.Error().Err(err).Msg("[server] write get-empty error")
 							return
 						}
 						continue
@@ -1188,22 +1200,22 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					payload.Write(encodeShortStr(""))
 					payload.Write(encodeLong(0))
 					if err := WriteMethod(conn, f.Channel, classBasic, methodBasicGetOk, payload.Bytes()); err != nil {
-						fmt.Printf("[server] write get-ok error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write get-ok error")
 						return
 					}
 					if err := WriteFrame(conn, Frame{Type: frameHeader, Channel: f.Channel, Payload: buildContentHeaderPayload(classBasic, uint64(len(msg)))}); err != nil {
-						fmt.Printf("[server] write header error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write header error")
 						return
 					}
 					if err := WriteFrame(conn, Frame{Type: frameBody, Channel: f.Channel, Payload: msg}); err != nil {
-						fmt.Printf("[server] write body error: %v\n", err)
+						logger.Error().Err(err).Msg("[server] write body error")
 						return
 					}
 					continue
 				}
 				// default: no handler -> empty
 				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicGetEmpty, []byte{}); err != nil {
-					fmt.Printf("[server] write get-empty error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write get-empty error")
 					return
 				}
 				continue
@@ -1232,7 +1244,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 						idx = idx + 1 + l
 					}
 				}
-				fmt.Printf("[server] basic.publish exchange=%q routing-key=%q\n", exch, rkey)
+				logger.Debug().Msg(fmt.Sprintf("[server] basic.publish exchange=%q routing-key=%q\n", exch, rkey))
 				// next frame must be header
 				hf, err := ReadFrame(conn)
 				if err != nil {
@@ -1535,26 +1547,26 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					tag := st.publishSeq
 					if publishNack {
 						if err := WriteMethod(conn, f.Channel, classBasic, methodBasicNack, buildNackArgs(tag, false, false)); err != nil {
-							fmt.Printf("[server] write basic.nack error: %v\n", err)
+							logger.Error().Err(err).Msg("[server] write basic.nack error")
 							return
 						}
-						fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.nack, tag=%d)\n", f.Channel, classBasic, methodBasicNack, tag)
+						logger.Debug().Msg(fmt.Sprintf("[server] send method chan=%d class=%d method=%d (basic.nack, tag=%d)\n", f.Channel, classBasic, methodBasicNack, tag))
 					} else {
 						if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(tag, false)); err != nil {
-							fmt.Printf("[server] write basic.ack error: %v\n", err)
+							logger.Error().Err(err).Msg("[server] write basic.ack error")
 							return
 						}
-						fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.ack, tag=%d)\n", f.Channel, classBasic, methodBasicAck, tag)
+						logger.Debug().Msg(fmt.Sprintf("[server] send method chan=%d class=%d method=%d (basic.ack, tag=%d)\n", f.Channel, classBasic, methodBasicAck, tag))
 					}
 					continue
 				}
 
 				// backwards-compatible behavior: when not in confirm mode send an ack with tag 1
 				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(1, false)); err != nil {
-					fmt.Printf("[server] write basic.ack error: %v\n", err)
+					logger.Error().Err(err).Msg("[server] write basic.ack error")
 					return
 				}
-				fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.ack)\n", f.Channel, classBasic, methodBasicAck)
+				logger.Debug().Msg(fmt.Sprintf("[server] send method chan=%d class=%d method=%d (basic.ack)\n", f.Channel, classBasic, methodBasicAck))
 				continue
 			}
 		case frameHeartbeat:

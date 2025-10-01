@@ -6,13 +6,13 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/ericogr/amqp-test/pkg/amqp"
+	"github.com/rs/zerolog"
 )
 
 // minimal encoders used by the default server
@@ -47,17 +47,15 @@ func encodeShort(v uint16) []byte {
 	return b
 }
 
-func encodeLong(v uint32) []byte {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, v)
-	return b
-}
-
 func main() {
 	addr := flag.String("addr", ":5672", "listen address")
 	flag.Parse()
 
-	fmt.Fprintf(os.Stdout, "starting minimal AMQP server on %s\n", *addr)
+	// configure logger and pass to SDK
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	amqp.SetLogger(logger)
+
+	logger.Info().Str("addr", *addr).Msg("starting minimal AMQP server")
 
 	// minimal in-memory broker for default server behavior
 	type consumer struct {
@@ -84,7 +82,7 @@ func main() {
 		mu.Lock()
 		defer mu.Unlock()
 		exchanges[exchange] = struct{}{}
-		fmt.Printf("exchange declared: %q type=%q\n", exchange, kind)
+		logger.Info().Str("exchange", exchange).Str("type", kind).Msg("exchange declared")
 		return nil
 	}
 
@@ -92,7 +90,7 @@ func main() {
 		mu.Lock()
 		defer mu.Unlock()
 		delete(exchanges, exchange)
-		fmt.Printf("exchange deleted: %q ifUnused=%v nowait=%v\n", exchange, ifUnused, nowait)
+		logger.Info().Str("exchange", exchange).Bool("ifUnused", ifUnused).Bool("nowait", nowait).Msg("exchange deleted")
 		return nil
 	}
 
@@ -100,14 +98,14 @@ func main() {
 		mu.Lock()
 		defer mu.Unlock()
 		// for demo we don't implement routing here; just log the bind
-		fmt.Printf("exchange bind: %q <- %q key=%q nowait=%v vhost=%q tls=%v\n", destination, source, routingKey, nowait, ctx.Vhost, ctx.TLSState != nil)
+		logger.Info().Str("dest", destination).Str("source", source).Str("key", routingKey).Bool("nowait", nowait).Str("vhost", ctx.Vhost).Bool("tls", ctx.TLSState != nil).Msg("exchange bind")
 		return nil
 	}
 
 	handlers.OnExchangeUnbind = func(ctx amqp.ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
-		fmt.Printf("exchange unbind: %q <- %q key=%q nowait=%v vhost=%q tls=%v\n", destination, source, routingKey, nowait, ctx.Vhost, ctx.TLSState != nil)
+		logger.Info().Str("dest", destination).Str("source", source).Str("key", routingKey).Bool("nowait", nowait).Str("vhost", ctx.Vhost).Bool("tls", ctx.TLSState != nil).Msg("exchange unbind")
 		return nil
 	}
 
@@ -117,7 +115,7 @@ func main() {
 		if _, ok := queues[queue]; !ok {
 			queues[queue] = &queueState{name: queue, messages: make([][]byte, 0), consumers: make([]*consumer, 0), nextDeliveryTag: 0}
 		}
-		fmt.Printf("queue declared: %q\n", queue)
+		logger.Info().Str("queue", queue).Msg("queue declared")
 		return nil
 	}
 
@@ -129,7 +127,7 @@ func main() {
 			cnt = len(q.messages)
 			delete(queues, queue)
 		}
-		fmt.Printf("queue deleted: %q count=%d ifUnused=%v ifEmpty=%v nowait=%v\n", queue, cnt, ifUnused, ifEmpty, nowait)
+		logger.Info().Str("queue", queue).Int("count", cnt).Bool("ifUnused", ifUnused).Bool("ifEmpty", ifEmpty).Bool("nowait", nowait).Msg("queue deleted")
 		return cnt, nil
 	}
 
@@ -139,7 +137,7 @@ func main() {
 		if q, ok := queues[queue]; ok {
 			cnt := len(q.messages)
 			q.messages = make([][]byte, 0)
-			fmt.Printf("queue purged: %q count=%d\n", queue, cnt)
+			logger.Info().Str("queue", queue).Int("count", cnt).Msg("queue purged")
 			return cnt, nil
 		}
 		return 0, nil
@@ -184,7 +182,7 @@ func main() {
 					}
 					// success
 					q.nextDeliveryTag = delTag
-					fmt.Printf("[server] auto-delivered msg to queue=%q tag=%d\n", qname, delTag)
+					logger.Info().Str("queue", qname).Uint64("tag", delTag).Msg("auto-delivered msg")
 					delivered = true
 					break
 				}
@@ -205,14 +203,14 @@ func main() {
 		}
 		// ensure exchange exists
 		exchanges[exchange] = struct{}{}
-		fmt.Printf("bind %q -> %q key=%q\n", queue, exchange, rkey)
+		logger.Info().Str("queue", queue).Str("exchange", exchange).Str("rkey", rkey).Msg("bind")
 		return nil
 	}
 
 	handlers.OnQueueUnbind = func(ctx amqp.ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
-		fmt.Printf("queue unbind: %q <- %q key=%q vhost=%q tls=%v\n", queue, exchange, rkey, ctx.Vhost, ctx.TLSState != nil)
+		logger.Info().Str("queue", queue).Str("exchange", exchange).Str("rkey", rkey).Str("vhost", ctx.Vhost).Bool("tls", ctx.TLSState != nil).Msg("queue unbind")
 		return nil
 	}
 
@@ -280,16 +278,16 @@ func main() {
 
 	// optional: log client-side nacks/rejects
 	handlers.OnBasicNack = func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error {
-		fmt.Printf("client basic.nack chan=%d tag=%d multiple=%v requeue=%v\n", channel, deliveryTag, multiple, requeue)
+		logger.Info().Uint16("chan", channel).Uint64("tag", deliveryTag).Bool("multiple", multiple).Bool("requeue", requeue).Msg("client basic.nack")
 		return nil
 	}
 	handlers.OnBasicReject = func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, requeue bool) error {
-		fmt.Printf("client basic.reject chan=%d tag=%d requeue=%v\n", channel, deliveryTag, requeue)
+		logger.Info().Uint16("chan", channel).Uint64("tag", deliveryTag).Bool("requeue", requeue).Msg("client basic.reject")
 		return nil
 	}
 
 	handlers.OnBasicAck = func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool) error {
-		fmt.Printf("client basic.ack chan=%d tag=%d multiple=%v vhost=%q tls=%v\n", channel, deliveryTag, multiple, ctx.Vhost, ctx.TLSState != nil)
+		logger.Info().Uint16("chan", channel).Uint64("tag", deliveryTag).Bool("multiple", multiple).Str("vhost", ctx.Vhost).Bool("tls", ctx.TLSState != nil).Msg("client basic.ack")
 		return nil
 	}
 
@@ -328,7 +326,7 @@ func main() {
 		if username != "guest" || password != "guest" {
 			return fmt.Errorf("invalid credentials")
 		}
-		fmt.Printf("user %s authentication successful vhost=%s tls=%v\n", username, ctx.Vhost, ctx.TLSState != nil)
+		logger.Info().Str("user", username).Str("vhost", ctx.Vhost).Bool("tls", ctx.TLSState != nil).Msg("user authentication successful")
 
 		return nil
 	}
@@ -336,7 +334,7 @@ func main() {
 	// start plain TCP server
 	go func() {
 		if err := amqp.ServeWithAuth(*addr, nil, auth, handlers); err != nil {
-			log.Fatalf("server error: %v", err)
+			logger.Fatal().Err(err).Msg("server error")
 		}
 	}()
 
@@ -346,24 +344,24 @@ func main() {
 	if _, err := os.Stat(certFile); err == nil {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			log.Printf("failed to load tls cert: %v", err)
+			logger.Error().Err(err).Msg("failed to load tls cert")
 		} else {
 			tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 			lnRaw, err := net.Listen("tcp", ":5671")
 			if err != nil {
-				log.Printf("failed to listen on :5671: %v", err)
+				logger.Error().Err(err).Msg("failed to listen on :5671")
 			} else {
 				tlsLn := tls.NewListener(lnRaw, tlsCfg)
 				go func() {
 					if err := amqp.ServeWithListener(tlsLn, nil, auth, handlers); err != nil {
-						log.Fatalf("tls server error: %v", err)
+						logger.Fatal().Err(err).Msg("tls server error")
 					}
 				}()
-				fmt.Println("started TLS server on :5671")
+				logger.Info().Str("addr", ":5671").Msg("started TLS server")
 			}
 		}
 	} else {
-		fmt.Println("tls certs not found, skipping TLS listener (see: Makefile gen-certs)")
+		logger.Info().Msg("tls certs not found, skipping TLS listener (see: Makefile gen-certs)")
 	}
 
 	// block forever
