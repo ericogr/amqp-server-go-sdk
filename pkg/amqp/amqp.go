@@ -25,6 +25,7 @@ const (
 	classConnection = 10
 	classChannel    = 20
 	classBasic      = 60
+	classConfirm    = 85
 
 	methodConnStart   = 10
 	methodConnStartOk = 11
@@ -40,8 +41,10 @@ const (
 	methodChannelClose   = 40
 	methodChannelCloseOk = 41
 
-	methodBasicPublish = 40
-	methodBasicAck     = 80
+	methodBasicPublish    = 40
+	methodBasicAck        = 80
+	methodConfirmSelect   = 10
+	methodConfirmSelectOk = 11
 )
 
 // Frame represents a raw AMQP frame
@@ -398,6 +401,13 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 		}
 	}
 
+	// channel states: track confirming mode and publish sequence per channel
+	type channelState struct {
+		confirming bool
+		publishSeq uint64
+	}
+	channelStates := map[uint16]*channelState{}
+
 	// now handle channel opens and basic.publish
 	for {
 		f, err := ReadFrame(conn)
@@ -428,6 +438,8 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 			}
 			// channel open
 			if classID == classChannel && methodID == methodChannelOpen {
+				// create channel state
+				channelStates[f.Channel] = &channelState{confirming: false, publishSeq: 0}
 				// respond with channel.open-ok on same channel (reserved longstr)
 				if err := WriteMethod(conn, f.Channel, classChannel, methodChannelOpenOk, encodeLongStr("")); err != nil {
 					fmt.Printf("[server] write channel.open-ok error: %v\n", err)
@@ -445,6 +457,25 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 				fmt.Printf("[server] send method chan=%d class=%d method=%d (channel.close-ok)\n", f.Channel, classChannel, methodChannelCloseOk)
 				continue
 			}
+			// confirm.select
+			if classID == classConfirm && methodID == methodConfirmSelect {
+				// Put channel into confirm mode. We ignore args (nowait) for simplicity.
+				st, ok := channelStates[f.Channel]
+				if !ok {
+					st = &channelState{confirming: false, publishSeq: 0}
+					channelStates[f.Channel] = st
+				}
+				st.confirming = true
+				st.publishSeq = 0
+				// respond with select-ok
+				if err := WriteMethod(conn, f.Channel, classConfirm, methodConfirmSelectOk, []byte{}); err != nil {
+					fmt.Printf("[server] write confirm.select-ok error: %v\n", err)
+					return
+				}
+				fmt.Printf("[server] send method chan=%d class=%d method=%d (confirm.select-ok)\n", f.Channel, classConfirm, methodConfirmSelectOk)
+				continue
+			}
+
 			// basic.publish
 			if classID == classBasic && methodID == methodBasicPublish {
 				// parse fields: reserved-1 (short), exchange (shortstr), routing-key (shortstr)
@@ -498,7 +529,22 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 				}
 				// invoke handler
 				_ = handler(f.Channel, body.Bytes())
-				// send basic.ack (class 60 method 80) with delivery-tag 1
+
+				// determine ack behavior: if channel is in confirm mode send a
+				// publisher-confirm Basic.Ack with an incrementing delivery tag
+				st, ok := channelStates[f.Channel]
+				if ok && st.confirming {
+					st.publishSeq++
+					tag := st.publishSeq
+					if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(tag, false)); err != nil {
+						fmt.Printf("[server] write basic.ack error: %v\n", err)
+						return
+					}
+					fmt.Printf("[server] send method chan=%d class=%d method=%d (basic.ack, tag=%d)\n", f.Channel, classBasic, methodBasicAck, tag)
+					continue
+				}
+
+				// backwards-compatible behavior: when not in confirm mode send an ack with tag 1
 				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicAck, buildAckArgs(1, false)); err != nil {
 					fmt.Printf("[server] write basic.ack error: %v\n", err)
 					return

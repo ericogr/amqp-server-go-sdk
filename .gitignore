@@ -1,0 +1,41 @@
+
+# --- Go / build artifacts ---
+# Binaries for programs and plugins
+bin/
+build/
+dist/
+
+# Test and coverage outputs
+*.test
+*.out
+coverage.out
+*.coverprofile
+
+# Local go cache used in CI/tests here
+.gocache/
+
+# Vendored dependencies (uncomment if you vendor dependencies)
+/vendor/
+
+# --- Editor / OS files ---
+# Vim swap
+*.swp
+# Backup files
+*~
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+
+# IDE folders
+.idea/
+.vscode/
+
+# --- Secrets / local env ---
+.env
+.env.*.local
+
+# --- Misc ---
+*.log
+*.tmp
+server

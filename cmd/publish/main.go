@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
@@ -36,7 +38,15 @@ func main() {
 	}()
 
 	fmt.Println("publishing...")
-	err = ch.Publish(
+
+	if err := ch.Confirm(false); err != nil {
+		log.Fatalf("channel could not be put into confirm mode: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dConfirm, err := ch.PublishWithDeferredConfirmWithContext(ctx,
 		*exchange,
 		*key,
 		false,
@@ -50,5 +60,16 @@ func main() {
 		log.Fatalf("publish: %v", err)
 	}
 
-	fmt.Println("published")
+	// Wait for the server to confirm the publish. Wait() will return true on ack.
+	if dConfirm == nil {
+		// not in confirm mode
+		fmt.Println("published (no confirm mode)")
+		return
+	}
+
+	if ok := dConfirm.Wait(); ok {
+		fmt.Println("published and confirmed")
+	} else {
+		log.Fatalf("publish was not acknowledged or timed out")
+	}
 }
