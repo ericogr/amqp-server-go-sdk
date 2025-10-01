@@ -16,6 +16,9 @@ test:
 publish:
 	go run ./cmd/publish --addr amqp://guest:guest@127.0.0.1:$(DEFAULT_PORT)/ --exchange "" --key test --body "hello" --exchange testx --queue testq --delete-exchange true
 
+consume:
+	go run ./cmd/consume --addr amqps://guest:guest@127.0.0.1:5671/ --queue test-queue
+
 .PHONY: gen-certs
 
 gen-certs:

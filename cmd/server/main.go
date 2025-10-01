@@ -145,6 +145,57 @@ func main() {
 		return 0, nil
 	}
 
+	// periodic generator: push a message to the demo queue every 2 seconds
+	// only generate a message when there is at least one consumer for the queue
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for t := range ticker.C {
+			mu.Lock()
+			qname := "test-queue"
+			q, ok := queues[qname]
+			if ok && len(q.consumers) > 0 {
+				msg := []byte(fmt.Sprintf("auto-msg-%d", t.UnixNano()))
+				delivered := false
+				// try to deliver to the first available consumer; remove dead consumers on write errors
+				for i := 0; i < len(q.consumers); {
+					c := q.consumers[i]
+					// prepare delivery args with a tentative delivery tag
+					delTag := q.nextDeliveryTag + 1
+					var dar bytes.Buffer
+					dar.Write(encodeShortStr(c.tag))
+					dar.Write(encodeLongLong(delTag))
+					dar.WriteByte(0)
+					dar.Write(encodeShortStr(""))
+					dar.Write(encodeShortStr(""))
+
+					if err := c.writeMeth(c.channel, 60, 60, dar.Bytes()); err != nil {
+						// remove dead consumer
+						q.consumers = append(q.consumers[:i], q.consumers[i+1:]...)
+						continue
+					}
+					if err := c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(msg)))}); err != nil {
+						q.consumers = append(q.consumers[:i], q.consumers[i+1:]...)
+						continue
+					}
+					if err := c.writeFrm(amqp.Frame{Type: 3, Channel: c.channel, Payload: msg}); err != nil {
+						q.consumers = append(q.consumers[:i], q.consumers[i+1:]...)
+						continue
+					}
+					// success
+					q.nextDeliveryTag = delTag
+					fmt.Printf("[server] auto-delivered msg to queue=%q tag=%d\n", qname, delTag)
+					delivered = true
+					break
+				}
+				if !delivered {
+					// no live consumers found; do nothing
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+
 	handlers.OnQueueBind = func(ctx amqp.ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
