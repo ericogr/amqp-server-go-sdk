@@ -24,6 +24,16 @@ Contents
   (`github.com/rabbitmq/amqp091-go`) to publish a message to the local server.
 - `Makefile` - convenience targets: `build`, `run`, `test`, `publish`, `clean`.
 
+TLS support
+
+- The server can accept TLS connections. If `tls/server.pem` and `tls/server.key`
+  exist the example server will start a TLS listener on `:5671` in addition to the
+  plain TCP listener on `:5672`.
+- Use `make gen-certs` to generate a self-signed certificate pair for local testing.
+- Handlers receive `ConnContext` which now includes `Vhost` and `TLSState` so
+  authentication handlers can inspect the requested virtual-host and the
+  client/server TLS connection state (e.g. client certificates).
+
 Quick start
 
 1. Build (optional):

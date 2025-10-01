@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -228,8 +230,8 @@ func main() {
 	}
 
 	// simple auth handler: accept PLAIN guest:guest
-	// now receives the requested `vhost` as third parameter
-	auth := func(mechanism string, response []byte, vhost string) error {
+	// receives the connection context so it can inspect `Vhost` and TLS state
+	auth := func(ctx amqp.ConnContext, mechanism string, response []byte) error {
 		if mechanism != "PLAIN" {
 			return fmt.Errorf("unsupported mechanism %q", mechanism)
 		}
@@ -248,12 +250,44 @@ func main() {
 		if username != "guest" || password != "guest" {
 			return fmt.Errorf("invalid credentials")
 		}
-		fmt.Printf("user %s authentication successful vhost=%s\n", username, vhost)
+		fmt.Printf("user %s authentication successful vhost=%s tls=%v\n", username, ctx.Vhost, ctx.TLSState != nil)
 
 		return nil
 	}
 
-	if err := amqp.ServeWithAuth(*addr, nil, auth, handlers); err != nil {
-		log.Fatalf("server error: %v", err)
+	// start plain TCP server
+	go func() {
+		if err := amqp.ServeWithAuth(*addr, nil, auth, handlers); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// try to start TLS server on :5671 if certs are available
+	certFile := "tls/server.pem"
+	keyFile := "tls/server.key"
+	if _, err := os.Stat(certFile); err == nil {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			log.Printf("failed to load tls cert: %v", err)
+		} else {
+			tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+			lnRaw, err := net.Listen("tcp", ":5671")
+			if err != nil {
+				log.Printf("failed to listen on :5671: %v", err)
+			} else {
+				tlsLn := tls.NewListener(lnRaw, tlsCfg)
+				go func() {
+					if err := amqp.ServeWithListener(tlsLn, nil, auth, handlers); err != nil {
+						log.Fatalf("tls server error: %v", err)
+					}
+				}()
+				fmt.Println("started TLS server on :5671")
+			}
+		}
+	} else {
+		fmt.Println("tls certs not found, skipping TLS listener (see: Makefile gen-certs)")
 	}
+
+	// block forever
+	select {}
 }

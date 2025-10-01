@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log"
@@ -11,7 +12,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "amqp://guest:guest@127.0.0.1:5672/", "AMQP URL")
+	addr := flag.String("addr", "amqps://guest:guest@127.0.0.1:5671/", "AMQP URL")
 	exchange := flag.String("exchange", "", "exchange name")
 	key := flag.String("key", "test", "routing key")
 	queue := flag.String("queue", "test-queue", "queue name")
@@ -21,7 +22,9 @@ func main() {
 	purgeQueue := flag.Bool("purge-queue", false, "purge queue after publish")
 	flag.Parse()
 
-	conn, err := amqp091.Dial(*addr)
+	// dial using TLS (insecure skip verify for demo/self-signed certs)
+	tlsCfg := &tls.Config{InsecureSkipVerify: true}
+	conn, err := amqp091.DialTLS(*addr, tlsCfg)
 	if err != nil {
 		log.Fatalf("dial: %v", err)
 	}

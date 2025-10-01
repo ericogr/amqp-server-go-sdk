@@ -2,6 +2,7 @@ package amqp
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -273,6 +274,7 @@ func buildContentHeaderPayload(classID uint16, bodySize uint64) []byte {
 type ConnContext struct {
 	Conn        net.Conn
 	Vhost       string
+	TLSState    *tls.ConnectionState
 	WriteMethod func(channel uint16, classID, methodID uint16, args []byte) error
 	WriteFrame  func(f Frame) error
 }
@@ -306,11 +308,11 @@ func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byt
 }
 
 // AuthHandler is called during the connection handshake to validate
-// credentials. The handler receives the selected SASL mechanism, the raw
-// response bytes (from Start-Ok) and the requested virtual-host (vhost)
-// supplied in Connection.Open. If the handler returns a non-nil error the
-// server will close the connection.
-type AuthHandler func(mechanism string, response []byte, vhost string) error
+// credentials. The handler receives a connection context (`ConnContext`) so it
+// can inspect the requested virtual-host and TLS state, plus the selected SASL
+// mechanism and the raw response bytes (from Start-Ok). If the handler
+// returns a non-nil error the server will close the connection.
+type AuthHandler func(ctx ConnContext, mechanism string, response []byte) error
 
 // ServeWithAuth starts the server like Serve but allows providing an
 // AuthHandler to validate credentials during the handshake.
@@ -320,6 +322,13 @@ func ServeWithAuth(addr string, handler func(ctx ConnContext, channel uint16, bo
 		return err
 	}
 	defer ln.Close()
+	return ServeWithListener(ln, handler, auth, handlers)
+}
+
+// ServeWithListener accepts an existing net.Listener (possibly TLS) and
+// serves AMQP on it. This allows callers to provide a tls.Listener when
+// they want TLS-enabled transport.
+func ServeWithListener(ln net.Listener, handler func(ctx ConnContext, channel uint16, body []byte) error, auth AuthHandler, handlers *ServerHandlers) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -391,8 +400,21 @@ func handleConn(conn net.Conn, handler func(ctx ConnContext, channel uint16, bod
 // optional authentication using the provided AuthHandler during Start-Ok.
 func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uint16, body []byte) error, auth AuthHandler, handlers *ServerHandlers) {
 	defer conn.Close()
-	// set a deadline for initial header
+	// set a deadline for initial header and TLS handshake
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	// If this connection is TLS, perform the TLS handshake now so we can
+	// obtain the TLS connection state for handlers/auth.
+	var tlsState *tls.ConnectionState
+	if tc, ok := conn.(*tls.Conn); ok {
+		if err := tc.Handshake(); err != nil {
+			fmt.Printf("[server] tls handshake error: %v\n", err)
+			return
+		}
+		st := tc.ConnectionState()
+		tlsState = &st
+	}
+
 	// read 8-byte protocol header
 	hdr := make([]byte, 8)
 	if _, err := io.ReadFull(conn, hdr); err != nil {
@@ -416,6 +438,8 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 	// authentication info parsed from Start-Ok (if auth handler provided)
 	var authMech string
 	var authResp []byte
+	// tls state populated earlier if this was a TLS connection
+	var connTLSState *tls.ConnectionState = tlsState
 
 	// read frames until we see Start-Ok (class 10 method 11). If auth is
 	// provided, parse mechanism/response and store them; actual authentication
@@ -435,7 +459,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		}
 		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
 		// build connection-scoped context for handlers
-		ctx = ConnContext{Conn: conn, Vhost: vhost, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
+		ctx = ConnContext{Conn: conn, Vhost: vhost, TLSState: connTLSState, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 		if classID == classConnection && methodID == methodConnStartOk {
 			if auth != nil {
 				mech, resp, _, err := parseStartOkArgs(args)
@@ -503,6 +527,8 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 			}
 			fmt.Printf("[server] connection.open vhost=%q\n", vhost)
+			// build connection-scoped context for handlers (we now know vhost/TLS)
+			ctx = ConnContext{Conn: conn, Vhost: vhost, TLSState: connTLSState, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 			// if an auth handler was provided, run it now that we know the vhost
 			if auth != nil {
 				if authMech == "" {
@@ -510,7 +536,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					_ = writeConnectionClose(conn, 540, "Missing start-ok", 0, 0)
 					return
 				}
-				if err := auth(authMech, authResp, vhost); err != nil {
+				if err := auth(ctx, authMech, authResp); err != nil {
 					_ = writeConnectionClose(conn, 403, "ACCESS_REFUSED", classConnection, methodConnStartOk)
 					return
 				}
@@ -1031,7 +1057,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 
 				// build connection-scoped context for handlers
-				ctx = ConnContext{Conn: conn, Vhost: vhost, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
+				ctx = ConnContext{Conn: conn, Vhost: vhost, TLSState: connTLSState, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
 				if handler != nil {
 					_ = handler(ctx, f.Channel, body.Bytes())
 				}
