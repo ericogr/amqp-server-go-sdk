@@ -787,11 +787,11 @@ func TestServePublishConfirmWithNack(t *testing.T) {
 	defer cConn.Close()
 
 	handlers := &ServerHandlers{}
-	handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+	handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, mandatory bool, immediate bool, properties BasicProperties, body []byte) (bool, bool, error) {
 		if string(body) == "nack-me" {
-			return true, nil
+			return true, true, nil
 		}
-		return false, nil
+		return true, false, nil
 	}
 
 	done := make(chan struct{})
@@ -1343,7 +1343,7 @@ func TestQueueDeclareConsumeFlow(t *testing.T) {
 			}
 			return consumerTag, nil
 		}
-		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, mandatory bool, immediate bool, properties BasicProperties, body []byte) (bool, bool, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if exchange == "" {
@@ -1361,14 +1361,14 @@ func TestQueueDeclareConsumeFlow(t *testing.T) {
 						_ = c.write(c.channel, 60, 60, dar.Bytes())
 						_ = c.writeF(Frame{Type: frameHeader, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
 						_ = c.writeF(Frame{Type: frameBody, Channel: c.channel, Payload: body})
-						return false, nil
+						return true, false, nil
 					}
 					q.messages = append(q.messages, append([]byte(nil), body...))
-					return false, nil
+					return true, false, nil
 				}
-				return false, nil
+				return false, false, nil
 			}
-			return false, nil
+			return false, false, nil
 		}
 		handleConnWithAuth(sConn, func(ctx ConnContext, channel uint16, body []byte) error { return nil }, nil, handlers)
 		close(done)
@@ -1536,7 +1536,7 @@ func TestBasicGetFlow(t *testing.T) {
 			}
 			return nil
 		}
-		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, mandatory bool, immediate bool, properties BasicProperties, body []byte) (bool, bool, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if exchange == "" {
@@ -1554,14 +1554,14 @@ func TestBasicGetFlow(t *testing.T) {
 						_ = c.write(c.channel, 60, 60, dar.Bytes())
 						_ = c.writeF(Frame{Type: frameHeader, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
 						_ = c.writeF(Frame{Type: frameBody, Channel: c.channel, Payload: body})
-						return false, nil
+						return true, false, nil
 					}
 					q.messages = append(q.messages, append([]byte(nil), body...))
-					return false, nil
+					return true, false, nil
 				}
-				return false, nil
+				return false, false, nil
 			}
-			return false, nil
+			return false, false, nil
 		}
 		handlers.OnBasicGet = func(ctx ConnContext, channel uint16, queue string, noAck bool) (bool, uint64, []byte, error) {
 			mu.Lock()

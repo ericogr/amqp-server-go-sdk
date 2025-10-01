@@ -195,7 +195,7 @@ func main() {
 		return consumerTag, nil
 	}
 
-	handlers.OnBasicPublish = func(ctx amqp.ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (bool, error) {
+	handlers.OnBasicPublish = func(ctx amqp.ConnContext, channel uint16, exchange, rkey string, mandatory bool, immediate bool, properties amqp.BasicProperties, body []byte) (bool, bool, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		// default routing: if exchange empty, deliver to queue named rkey
@@ -214,17 +214,17 @@ func main() {
 					_ = c.writeMeth(c.channel, 60, 60, dar.Bytes())
 					_ = c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
 					_ = c.writeFrm(amqp.Frame{Type: 3, Channel: c.channel, Payload: body})
-					return false, nil
+					return true, false, nil
 				}
 				// enqueue
 				q.messages = append(q.messages, append([]byte(nil), body...))
-				return false, nil
+				return true, false, nil
 			}
 			// no such queue -> drop
-			return false, nil
+			return false, false, nil
 		}
 		// for non-empty exchange default do nothing
-		return false, nil
+		return false, false, nil
 	}
 
 	// optional: log client-side nacks/rejects

@@ -25,7 +25,7 @@ status value and a short inline note describing the current state when relevant.
 | Queue (50) | `Unbind` / `Unbind-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueUnbind`; fields parsed: queue, exchange, routing-key, arguments; `unbind-ok` always sent on success.
 | Queue (50) | `Purge` / `Purge-Ok` | Implemented | Delegated to `ServerHandlers.OnQueuePurge`; `purge-ok` includes `message-count` returned by handler.
 | Queue (50) | `Delete` / `Delete-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueDelete`; flags (`if-unused`,`if-empty`,`nowait`) parsed; handler returns deleted message-count which is included in `delete-ok`.
-| Basic (60) | `Publish` | Partial | Parsing and delegation implemented; `OnBasicPublish` returns `(nack bool, error)` and confirm-mode ack/nack is sent; limited handling of properties/mandatory/return.
+| Basic (60) | `Publish` | Implemented | Parsing and delegation implemented; SDK parses method flags (mandatory/immediate), content header properties (common properties + headers table) into `BasicProperties` and delegates to `ServerHandlers.OnBasicPublish(ctx, channel, exchange, rkey, mandatory, immediate, properties, body)`. Handler returns `(routed bool, nack bool, error)` — SDK will send `basic.return` when required and confirm ack/nack in confirm mode. Field-table parsing is basic (supports common types) and may be extended.
 | Basic (60) | `Deliver` (server→client) | Implemented | SDK sends `basic.deliver` frames; delivery behavior is the responsibility of the handler.
 | Basic (60) | `Consume` / `Consume-Ok` | Implemented | Delegated to `ServerHandlers.OnBasicConsume`; `consume-ok` is sent.
 | Basic (60) | `Get` / `Get-Ok` / `Get-Empty` | Implemented | Delegated to `ServerHandlers.OnBasicGet`.

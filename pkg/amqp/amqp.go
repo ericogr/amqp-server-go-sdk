@@ -283,6 +283,25 @@ type ConnContext struct {
 	WriteFrame  func(f Frame) error
 }
 
+// BasicProperties represents parsed content header properties from a content header frame.
+type BasicProperties struct {
+	ContentType     string
+	ContentEncoding string
+	Headers         map[string]interface{}
+	DeliveryMode    uint8
+	Priority        uint8
+	CorrelationId   string
+	ReplyTo         string
+	Expiration      string
+	MessageId       string
+	Timestamp       time.Time
+	Type            string
+	UserId          string
+	AppId           string
+	ClusterId       string
+	Raw             []byte // raw property bytes
+}
+
 // ServerHandlers allows the server application to handle protocol operations
 type ServerHandlers struct {
 	OnExchangeDeclare func(ctx ConnContext, channel uint16, exchange, kind string, args []byte) error
@@ -301,9 +320,15 @@ type ServerHandlers struct {
 	OnQueueBind    func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
 	OnQueueUnbind  func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
 	OnBasicConsume func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
-	// OnBasicPublish returns (nack, err). If nack==true and the channel is in confirm mode
-	// the SDK will send a Basic.Nack for the publishing tag.
-	OnBasicPublish func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (nack bool, err error)
+	// OnBasicPublish is called for incoming basic.publish. The SDK parses
+	// method args, flags and content header properties and passes a structured
+	// `BasicProperties` to the handler. The handler returns two booleans:
+	//  - routed: whether the publication was routed/delivered (used to implement mandatory/immediate behavior)
+	//  - nack: whether the server should send a publisher confirmation Nack
+	// The SDK will send basic.return if the message is not routed and the
+	// publisher requested mandatory/immediate, and will send confirm acks/nacks
+	// when in confirm mode according to the handler's return values.
+	OnBasicPublish func(ctx ConnContext, channel uint16, exchange, rkey string, mandatory bool, immediate bool, properties BasicProperties, body []byte) (routed bool, nack bool, err error)
 	OnBasicGet     func(ctx ConnContext, channel uint16, queue string, noAck bool) (found bool, deliveryTag uint64, body []byte, err error)
 	// Incoming client-to-server notifications
 	OnBasicNack   func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error
@@ -1192,11 +1217,211 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				if hf.Type != frameHeader {
 					return
 				}
-				// parse body-size at payload[4:12]
+				// parse content header: class-id (short), weight (short), body-size (longlong)
 				if len(hf.Payload) < 12 {
 					return
 				}
 				bodySize := binary.BigEndian.Uint64(hf.Payload[4:12])
+				// parse property flags and properties
+				var props BasicProperties
+				if len(hf.Payload) > 12 {
+					// property flags may be one or more shorts; parse accordingly
+					pos := 12
+					var propFlags uint16
+					if pos+2 <= len(hf.Payload) {
+						propFlags = binary.BigEndian.Uint16(hf.Payload[pos : pos+2])
+						pos += 2
+					}
+					// property flag parsing: bit 15 -> content-type, bit 14 -> content-encoding, ... down to bit 1 -> cluster-id
+					// if LSB (bit 0) of flags is 1, there is another property-flag short following.
+					flagWords := []uint16{propFlags}
+					for (flagWords[len(flagWords)-1] & 1) == 1 {
+						if pos+2 > len(hf.Payload) {
+							break
+						}
+						fw := binary.BigEndian.Uint16(hf.Payload[pos : pos+2])
+						pos += 2
+						flagWords = append(flagWords, fw)
+					}
+					// flatten bits from the sequence of flagWords into a slice of bools for property presence
+					var bits []bool
+					for _, fw := range flagWords {
+						for i := 15; i >= 1; i-- {
+							bits = append(bits, (fw&(1<<uint(i))) != 0)
+						}
+					}
+					// property order
+					propOrder := []string{"content-type", "content-encoding", "headers", "delivery-mode", "priority", "correlation-id", "reply-to", "expiration", "message-id", "timestamp", "type", "user-id", "app-id", "cluster-id"}
+					for i, present := range bits {
+						if i >= len(propOrder) {
+							break
+						}
+						if !present {
+							continue
+						}
+						name := propOrder[i]
+						switch name {
+						case "content-type":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.ContentType = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "content-encoding":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.ContentEncoding = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "headers":
+							// field-table: 4-byte length then key/value pairs
+							if pos+4 <= len(hf.Payload) {
+								tblLen := int(binary.BigEndian.Uint32(hf.Payload[pos : pos+4]))
+								pos += 4
+								end := pos + tblLen
+								props.Headers = map[string]interface{}{}
+								for pos < end {
+									klen := int(hf.Payload[pos])
+									pos++
+									k := string(hf.Payload[pos : pos+klen])
+									pos += klen
+									// value: type byte
+									typ := hf.Payload[pos]
+									pos++
+									switch typ {
+									case 'S':
+										if pos+4 <= end {
+											vlen := int(binary.BigEndian.Uint32(hf.Payload[pos : pos+4]))
+											pos += 4
+											if pos+vlen <= end {
+												props.Headers[k] = string(hf.Payload[pos : pos+vlen])
+												pos += vlen
+											}
+										}
+									case 's':
+										if pos < end {
+											vlen := int(hf.Payload[pos])
+											pos++
+											if pos+vlen <= end {
+												props.Headers[k] = string(hf.Payload[pos : pos+vlen])
+												pos += vlen
+											}
+										}
+									case 'I':
+										if pos+4 <= end {
+											props.Headers[k] = int32(binary.BigEndian.Uint32(hf.Payload[pos : pos+4]))
+											pos += 4
+										}
+									case 't':
+										if pos < end {
+											props.Headers[k] = hf.Payload[pos] != 0
+											pos++
+										}
+									default:
+										// unknown type: skip (best-effort)
+										// cannot reliably skip unknown type; abort parsing headers
+										pos = end
+									}
+								}
+							}
+						case "delivery-mode":
+							if pos < len(hf.Payload) {
+								props.DeliveryMode = hf.Payload[pos]
+								pos++
+							}
+						case "priority":
+							if pos < len(hf.Payload) {
+								props.Priority = hf.Payload[pos]
+								pos++
+							}
+						case "correlation-id":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.CorrelationId = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "reply-to":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.ReplyTo = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "expiration":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.Expiration = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "message-id":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.MessageId = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "timestamp":
+							if pos+8 <= len(hf.Payload) {
+								ts := binary.BigEndian.Uint64(hf.Payload[pos : pos+8])
+								pos += 8
+								props.Timestamp = time.Unix(int64(ts), 0)
+							}
+						case "type":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.Type = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "user-id":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.UserId = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "app-id":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.AppId = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						case "cluster-id":
+							if pos < len(hf.Payload) {
+								l := int(hf.Payload[pos])
+								pos++
+								if pos+l <= len(hf.Payload) {
+									props.ClusterId = string(hf.Payload[pos : pos+l])
+									pos += l
+								}
+							}
+						}
+					}
+					props.Raw = hf.Payload[12:]
+				}
 				// read body frames until bodySize reached
 				var got uint64
 				var body bytes.Buffer
@@ -1214,19 +1439,69 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 
 				// build connection-scoped context for handlers
 				ctx = ConnContext{Conn: conn, Vhost: vhost, TLSState: connTLSState, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
+
+				// parse method args flags: after exchange and rkey there may be bits for mandatory/immediate
+				// parse method args for flags: we captured method payload earlier as args variable — reparse flags
+				var mandatory, immediate bool
+				// args was set earlier for method payload; reparse to find flags after exchange and rkey
+				{
+					idx2 := 0
+					if len(args) >= 2 {
+						idx2 = 2
+					}
+					if idx2 < len(args) {
+						l := int(args[idx2])
+						if idx2+1+l <= len(args) {
+							idx2 = idx2 + 1 + l
+						}
+					}
+					if idx2 < len(args) {
+						l := int(args[idx2])
+						if idx2+1+l <= len(args) {
+							idx2 = idx2 + 1 + l
+						}
+					}
+					if idx2 < len(args) {
+						// flags octet
+						flags := args[idx2]
+						if flags&1 == 1 {
+							mandatory = true
+						}
+						if flags&2 == 2 {
+							immediate = true
+						}
+					}
+				}
+
+				// call compatibility handler if provided
 				if handler != nil {
 					_ = handler(ctx, f.Channel, body.Bytes())
 				}
 
 				// delegate basic.publish processing to handlers if provided
 				var publishNack bool
+				var routed bool
 				if handlers != nil && handlers.OnBasicPublish != nil {
-					nack, err := handlers.OnBasicPublish(ctx, f.Channel, exch, rkey, hf.Payload, body.Bytes())
+					r, nack, err := handlers.OnBasicPublish(ctx, f.Channel, exch, rkey, mandatory, immediate, props, body.Bytes())
 					if err != nil {
 						_ = writeConnectionClose(conn, 504, "basic.publish handler failed", classBasic, methodBasicPublish)
 						return
 					}
+					routed = r
 					publishNack = nack
+				}
+
+				// handle mandatory/immediate: if message not routed and publisher requested return, send basic.return
+				if (mandatory || immediate) && !routed {
+					var rbuf bytes.Buffer
+					rbuf.Write(encodeShort(312)) // reply-code: no-route (312)
+					rbuf.Write(encodeLongStr("NO_ROUTE"))
+					rbuf.Write(encodeShortStr(exch))
+					rbuf.Write(encodeShortStr(rkey))
+					_ = WriteMethod(conn, f.Channel, classBasic, methodBasicReturn, rbuf.Bytes())
+					// send content header + body as return
+					_ = WriteFrame(conn, Frame{Type: frameHeader, Channel: f.Channel, Payload: buildContentHeaderPayload(classBasic, uint64(len(body.Bytes())))})
+					_ = WriteFrame(conn, Frame{Type: frameBody, Channel: f.Channel, Payload: body.Bytes()})
 				}
 
 				// determine ack behavior for the publishing channel
