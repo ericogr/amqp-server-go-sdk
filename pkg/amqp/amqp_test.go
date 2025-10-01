@@ -161,7 +161,7 @@ func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
 	qCh := make(chan struct{}, 1)
 
 	handlers := &ServerHandlers{}
-	handlers.OnExchangeDelete = func(ctx ConnContext, channel uint16, exchange string, args []byte) error {
+	handlers.OnExchangeDelete = func(ctx ConnContext, channel uint16, exchange string, ifUnused bool, nowait bool, args []byte) error {
 		gotEx = true
 		select {
 		case exCh <- struct{}{}:
@@ -169,13 +169,14 @@ func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
 		}
 		return nil
 	}
-	handlers.OnQueueDelete = func(ctx ConnContext, channel uint16, queue string, args []byte) error {
+	handlers.OnQueueDelete = func(ctx ConnContext, channel uint16, queue string, ifUnused bool, ifEmpty bool, nowait bool, args []byte) (int, error) {
 		gotQ = true
 		select {
 		case qCh <- struct{}{}:
 		default:
 		}
-		return nil
+		// simulate deleting 5 messages
+		return 5, nil
 	}
 
 	done := make(chan struct{})
@@ -249,12 +250,19 @@ func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read queue.delete-ok: %v", err)
 	}
-	ci, mi, _, err = ParseMethod(f.Payload)
+	ci, mi, args, err := ParseMethod(f.Payload)
 	if err != nil {
 		t.Fatalf("parse queue.delete-ok: %v", err)
 	}
 	if ci != classQueue || mi != methodQueueDeleteOk {
 		t.Fatalf("expected queue.delete-ok got %d:%d", ci, mi)
+	}
+	if len(args) < 4 {
+		t.Fatalf("delete-ok args too short")
+	}
+	cnt := binary.BigEndian.Uint32(args[0:4])
+	if cnt != 5 {
+		t.Fatalf("expected delete count 5 got %d", cnt)
 	}
 
 	// wait for handlers to be invoked

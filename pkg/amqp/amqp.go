@@ -279,12 +279,18 @@ type ConnContext struct {
 // ServerHandlers allows the server application to handle protocol operations
 type ServerHandlers struct {
 	OnExchangeDeclare func(ctx ConnContext, channel uint16, exchange, kind string, args []byte) error
-	OnExchangeDelete  func(ctx ConnContext, channel uint16, exchange string, args []byte) error
-	OnQueueDeclare    func(ctx ConnContext, channel uint16, queue string, args []byte) error
-	OnQueueDelete     func(ctx ConnContext, channel uint16, queue string, args []byte) error
-	OnQueuePurge      func(ctx ConnContext, channel uint16, queue string, args []byte) (int, error)
-	OnQueueBind       func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
-	OnBasicConsume    func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
+	// OnExchangeDelete is called when a client issues exchange.delete.
+	// Flags `ifUnused` and `nowait` are parsed and repassed to the handler.
+	OnExchangeDelete func(ctx ConnContext, channel uint16, exchange string, ifUnused bool, nowait bool, args []byte) error
+	OnQueueDeclare   func(ctx ConnContext, channel uint16, queue string, args []byte) error
+	// OnQueueDelete is called when a client issues queue.delete. The handler
+	// should return the number of messages deleted; the SDK will include that
+	// count in the queue.delete-ok payload. Flags `ifUnused`, `ifEmpty` and
+	// `nowait` are parsed and repassed to the handler.
+	OnQueueDelete  func(ctx ConnContext, channel uint16, queue string, ifUnused bool, ifEmpty bool, nowait bool, args []byte) (int, error)
+	OnQueuePurge   func(ctx ConnContext, channel uint16, queue string, args []byte) (int, error)
+	OnQueueBind    func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
+	OnBasicConsume func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
 	// OnBasicPublish returns (nack, err). If nack==true and the channel is in confirm mode
 	// the SDK will send a Basic.Nack for the publishing tag.
 	OnBasicPublish func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) (nack bool, err error)
@@ -647,15 +653,29 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 						idx = idx + 1 + l
 					}
 				}
+				// parse flags: if-unused (bit1), nowait (bit2)
+				var ifUnused bool
+				var nowait bool
+				if idx < len(args) {
+					flags := args[idx]
+					if flags&1 == 1 {
+						ifUnused = true
+					}
+					if flags&2 == 2 {
+						nowait = true
+					}
+				}
 				if handlers != nil && handlers.OnExchangeDelete != nil {
-					if err := handlers.OnExchangeDelete(ctx, f.Channel, exch, args); err != nil {
+					if err := handlers.OnExchangeDelete(ctx, f.Channel, exch, ifUnused, nowait, args); err != nil {
 						_ = writeConnectionClose(conn, 504, "exchange.delete failed", classExchange, methodExchangeDelete)
 						return
 					}
 				}
-				if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeDeleteOk, []byte{}); err != nil {
-					fmt.Printf("[server] write exchange.delete-ok error: %v\n", err)
-					return
+				if !nowait {
+					if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeDeleteOk, []byte{}); err != nil {
+						fmt.Printf("[server] write exchange.delete-ok error: %v\n", err)
+						return
+					}
 				}
 				continue
 			}
@@ -779,16 +799,37 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 						idx = idx + 1 + l
 					}
 				}
+				// parse flags: if-unused (bit1), if-empty (bit2), nowait (bit4)
+				var ifUnused bool
+				var ifEmpty bool
+				var nowait bool
+				if idx < len(args) {
+					flags := args[idx]
+					if flags&1 == 1 {
+						ifUnused = true
+					}
+					if flags&2 == 2 {
+						ifEmpty = true
+					}
+					if flags&4 == 4 {
+						nowait = true
+					}
+				}
+				var delCount int
 				if handlers != nil && handlers.OnQueueDelete != nil {
-					if err := handlers.OnQueueDelete(ctx, f.Channel, qname, args); err != nil {
+					c, err := handlers.OnQueueDelete(ctx, f.Channel, qname, ifUnused, ifEmpty, nowait, args)
+					if err != nil {
 						_ = writeConnectionClose(conn, 504, "queue.delete failed", classQueue, methodQueueDelete)
 						return
 					}
+					delCount = c
 				}
-				// queue.delete-ok: message-count (long)
-				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueDeleteOk, encodeLong(0)); err != nil {
-					fmt.Printf("[server] write queue.delete-ok error: %v\n", err)
-					return
+				// queue.delete-ok: message-count (long), unless nowait
+				if !nowait {
+					if err := WriteMethod(conn, f.Channel, classQueue, methodQueueDeleteOk, encodeLong(uint32(delCount))); err != nil {
+						fmt.Printf("[server] write queue.delete-ok error: %v\n", err)
+						return
+					}
 				}
 				continue
 			}

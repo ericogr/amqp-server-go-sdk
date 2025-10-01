@@ -86,11 +86,11 @@ func main() {
 		return nil
 	}
 
-	handlers.OnExchangeDelete = func(ctx amqp.ConnContext, channel uint16, exchange string, args []byte) error {
+	handlers.OnExchangeDelete = func(ctx amqp.ConnContext, channel uint16, exchange string, ifUnused bool, nowait bool, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 		delete(exchanges, exchange)
-		fmt.Printf("exchange deleted: %q\n", exchange)
+		fmt.Printf("exchange deleted: %q ifUnused=%v nowait=%v\n", exchange, ifUnused, nowait)
 		return nil
 	}
 
@@ -104,12 +104,16 @@ func main() {
 		return nil
 	}
 
-	handlers.OnQueueDelete = func(ctx amqp.ConnContext, channel uint16, queue string, args []byte) error {
+	handlers.OnQueueDelete = func(ctx amqp.ConnContext, channel uint16, queue string, ifUnused bool, ifEmpty bool, nowait bool, args []byte) (int, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		delete(queues, queue)
-		fmt.Printf("queue deleted: %q\n", queue)
-		return nil
+		cnt := 0
+		if q, ok := queues[queue]; ok {
+			cnt = len(q.messages)
+			delete(queues, queue)
+		}
+		fmt.Printf("queue deleted: %q count=%d ifUnused=%v ifEmpty=%v nowait=%v\n", queue, cnt, ifUnused, ifEmpty, nowait)
+		return cnt, nil
 	}
 
 	handlers.OnQueuePurge = func(ctx amqp.ConnContext, channel uint16, queue string, args []byte) (int, error) {
