@@ -20,6 +20,12 @@ func main() {
 	deleteExchange := flag.Bool("delete-exchange", false, "delete exchange after publish")
 	deleteQueue := flag.Bool("delete-queue", false, "delete queue after publish")
 	purgeQueue := flag.Bool("purge-queue", false, "purge queue after publish")
+	bindExchangeSource := flag.String("bind-exchange-source", "", "source exchange to bind from")
+	bindExchangeDest := flag.String("bind-exchange-dest", "", "destination exchange to bind to")
+	bindExchangeKey := flag.String("bind-exchange-key", "", "routing key for exchange bind")
+	unbindExchangeSource := flag.String("unbind-exchange-source", "", "source exchange to unbind from")
+	unbindExchangeDest := flag.String("unbind-exchange-dest", "", "destination exchange to unbind")
+	unbindExchangeKey := flag.String("unbind-exchange-key", "", "routing key for exchange unbind")
 	flag.Parse()
 
 	// dial using TLS (insecure skip verify for demo/self-signed certs)
@@ -60,6 +66,23 @@ func main() {
 		}
 		if err := ch.QueueBind(*queue, *key, *exchange, false, nil); err != nil {
 			log.Fatalf("queue bind: %v", err)
+		}
+		// optionally bind exchanges
+		if *bindExchangeSource != "" && *bindExchangeDest != "" {
+			if err := ch.ExchangeBind(*bindExchangeDest, *bindExchangeKey, *bindExchangeSource, false, nil); err != nil {
+				log.Printf("exchange bind: %v", err)
+			} else {
+				fmt.Printf("exchange bind: %q <- %q key=%q\n", *bindExchangeDest, *bindExchangeSource, *bindExchangeKey)
+			}
+		}
+	}
+
+	// optionally unbind an exchange if flags provided (demo)
+	if *unbindExchangeSource != "" && *unbindExchangeDest != "" {
+		if err := ch.ExchangeUnbind(*unbindExchangeDest, *unbindExchangeKey, *unbindExchangeSource, false, nil); err != nil {
+			log.Printf("exchange unbind: %v", err)
+		} else {
+			fmt.Printf("exchange unbound: %q <- %q key=%q\n", *unbindExchangeDest, *unbindExchangeSource, *unbindExchangeKey)
 		}
 	}
 

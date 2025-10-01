@@ -289,6 +289,208 @@ func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
 	}
 }
 
+func TestServerDelegatesExchangeBind(t *testing.T) {
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
+
+	var got bool
+	ch := make(chan struct{}, 1)
+
+	handlers := &ServerHandlers{}
+	handlers.OnExchangeBind = func(ctx ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
+		got = true
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
+
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	// open channel
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
+
+	// send exchange.bind
+	bindArgs := append(encodeShort(0), encodeShortStr("dest-ex")...)
+	bindArgs = append(bindArgs, encodeShortStr("src-ex")...)
+	bindArgs = append(bindArgs, encodeShortStr("rkey")...)
+	if err := WriteMethod(cConn, 1, classExchange, methodExchangeBind, bindArgs); err != nil {
+		t.Fatalf("write exchange.bind: %v", err)
+	}
+	// read bind-ok
+	f, err := ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read exchange.bind-ok: %v", err)
+	}
+	ci, mi, _, err := ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse exchange.bind-ok: %v", err)
+	}
+	if ci != classExchange || mi != methodExchangeBindOk {
+		t.Fatalf("expected exchange.bind-ok got %d:%d", ci, mi)
+	}
+
+	// wait for handler
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnExchangeBind not called")
+	}
+
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
+
+	if !got {
+		t.Fatalf("handler not invoked")
+	}
+}
+
+func TestServerDelegatesExchangeUnbind(t *testing.T) {
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
+
+	var got bool
+	ch := make(chan struct{}, 1)
+
+	handlers := &ServerHandlers{}
+	handlers.OnExchangeUnbind = func(ctx ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
+		got = true
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
+
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
+
+	// send exchange.unbind
+	ubArgs := append(encodeShort(0), encodeShortStr("dest-ex")...)
+	ubArgs = append(ubArgs, encodeShortStr("src-ex")...)
+	ubArgs = append(ubArgs, encodeShortStr("rkey")...)
+	ubArgs = append(ubArgs, byte(0)) // no-wait = false
+	if err := WriteMethod(cConn, 1, classExchange, methodExchangeUnbind, ubArgs); err != nil {
+		t.Fatalf("write exchange.unbind: %v", err)
+	}
+	f, err := ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read exchange.unbind-ok: %v", err)
+	}
+	ci, mi, _, err := ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse exchange.unbind-ok: %v", err)
+	}
+	if ci != classExchange || mi != methodExchangeUnbindOk {
+		t.Fatalf("expected exchange.unbind-ok got %d:%d", ci, mi)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnExchangeUnbind not called")
+	}
+
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
+
+	if !got {
+		t.Fatalf("handler not invoked")
+	}
+}
+
 func TestConnContextIncludesVhost(t *testing.T) {
 	sConn, cConn := net.Pipe()
 	defer sConn.Close()

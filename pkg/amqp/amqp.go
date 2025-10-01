@@ -55,6 +55,8 @@ const (
 	methodExchangeDeleteOk  = 21
 	methodExchangeBind      = 30
 	methodExchangeBindOk    = 31
+	methodExchangeUnbind    = 40
+	methodExchangeUnbindOk  = 51
 
 	// queue methods (class 50)
 	methodQueueDeclare   = 10
@@ -285,6 +287,8 @@ type ServerHandlers struct {
 	// OnExchangeDelete is called when a client issues exchange.delete.
 	// Flags `ifUnused` and `nowait` are parsed and repassed to the handler.
 	OnExchangeDelete func(ctx ConnContext, channel uint16, exchange string, ifUnused bool, nowait bool, args []byte) error
+	OnExchangeBind   func(ctx ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error
+	OnExchangeUnbind func(ctx ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error
 	OnQueueDeclare   func(ctx ConnContext, channel uint16, queue string, args []byte) error
 	// OnQueueDelete is called when a client issues queue.delete. The handler
 	// should return the number of messages deleted; the SDK will include that
@@ -682,6 +686,111 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeDeclareOk, []byte{}); err != nil {
 					fmt.Printf("[server] write exchange.declare-ok error: %v\n", err)
 					return
+				}
+				continue
+			}
+
+			// exchange.bind (delegate)
+			if classID == classExchange && methodID == methodExchangeBind {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				dest := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						dest = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				src := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						src = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				rkey := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						rkey = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				// nowait flag (optional)
+				var nowait bool
+				if idx < len(args) {
+					flags := args[idx]
+					if flags&1 == 1 {
+						nowait = true
+					}
+				}
+				if handlers != nil && handlers.OnExchangeBind != nil {
+					if err := handlers.OnExchangeBind(ctx, f.Channel, dest, src, rkey, nowait, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "exchange.bind failed", classExchange, methodExchangeBind)
+						return
+					}
+				}
+				if !nowait {
+					if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeBindOk, []byte{}); err != nil {
+						fmt.Printf("[server] write exchange.bind-ok error: %v\n", err)
+						return
+					}
+				}
+				continue
+			}
+
+			// exchange.unbind (delegate)
+			if classID == classExchange && methodID == methodExchangeUnbind {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				dest := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						dest = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				src := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						src = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				rkey := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						rkey = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				// no-wait (single octet)
+				var nowait bool
+				if idx < len(args) {
+					if args[idx] != 0 {
+						nowait = true
+					}
+				}
+				if handlers != nil && handlers.OnExchangeUnbind != nil {
+					if err := handlers.OnExchangeUnbind(ctx, f.Channel, dest, src, rkey, nowait, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "exchange.unbind failed", classExchange, methodExchangeUnbind)
+						return
+					}
+				}
+				if !nowait {
+					if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeUnbindOk, []byte{}); err != nil {
+						fmt.Printf("[server] write exchange.unbind-ok error: %v\n", err)
+						return
+					}
 				}
 				continue
 			}

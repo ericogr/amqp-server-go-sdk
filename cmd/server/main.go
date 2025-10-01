@@ -96,6 +96,21 @@ func main() {
 		return nil
 	}
 
+	handlers.OnExchangeBind = func(ctx amqp.ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		// for demo we don't implement routing here; just log the bind
+		fmt.Printf("exchange bind: %q <- %q key=%q nowait=%v vhost=%q tls=%v\n", destination, source, routingKey, nowait, ctx.Vhost, ctx.TLSState != nil)
+		return nil
+	}
+
+	handlers.OnExchangeUnbind = func(ctx amqp.ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Printf("exchange unbind: %q <- %q key=%q nowait=%v vhost=%q tls=%v\n", destination, source, routingKey, nowait, ctx.Vhost, ctx.TLSState != nil)
+		return nil
+	}
+
 	handlers.OnQueueDeclare = func(ctx amqp.ConnContext, channel uint16, queue string, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()

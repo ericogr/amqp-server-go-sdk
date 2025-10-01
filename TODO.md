@@ -19,7 +19,7 @@ status value and a short inline note describing the current state when relevant.
 | Channel (20) | `Flow` / `Flow-Ok` | Not implemented | Flow control not implemented.
 | Exchange (40) | `Declare` / `Declare-Ok` | Implemented | Delegated to `ServerHandlers.OnExchangeDeclare` (args passed to handler).
 | Exchange (40) | `Delete` / `Delete-Ok` | Implemented | Delegated to `ServerHandlers.OnExchangeDelete`; flags (`if-unused`,`nowait`) parsed; `nowait` suppresses reply.
-| Exchange (40) | `Bind` / `Bind-Ok` | Not implemented | Exchange-to-exchange bindings not stored/routed.
+| Exchange (40) | `Bind` / `Bind-Ok` | Implemented | Delegated to `ServerHandlers.OnExchangeBind`; flags (`nowait`) parsed; `nowait` suppresses reply.
 | Queue (50) | `Declare` / `Declare-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueDeclare`; `declare-ok` includes name and counters (currently zeros).
 | Queue (50) | `Bind` / `Bind-Ok` | Implemented | Delegated to `ServerHandlers.OnQueueBind`.
 | Queue (50) | `Purge` / `Purge-Ok` | Implemented | Delegated to `ServerHandlers.OnQueuePurge`; `purge-ok` includes `message-count` returned by handler.
