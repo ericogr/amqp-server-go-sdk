@@ -3,13 +3,23 @@
 This repository contains a minimal, educational implementation of parts of the AMQP 0-9-1
 wire protocol in Go and a tiny example server that accepts `basic.publish` messages.
 
+Important: this SDK parses the AMQP wire protocol and provides a delegation model for
+handling high level operations (exchanges, queues, publishes, consumes). It does NOT
+implement a full AMQP broker. Instead, the SDK calls application-provided handlers
+(`ServerHandlers`) through a connection context (`ConnContext`) so that the application
+implements policy and behavior (e.g. queue management, routing, persistence).
+
+This design keeps the SDK focused on protocol handling and lets applications (or the
+example server in `cmd/server`) implement the broker semantics they need.
+
 The project is intended as a learning/demo SDK — it is NOT a full AMQP broker and
 should not be used in production.
 
 Contents
-- `pkg/amqp` - small AMQP frame/method helpers and `Serve` helper to run a minimal server.
-- `cmd/server` - example server that uses `pkg/amqp.Serve`. It prints received message bodies
-  and sends `basic.ack` to the publisher.
+- `pkg/amqp` - AMQP frame/method helpers and `Serve` helpers. The SDK focuses on parsing
+  and producing frames and delegating behavioral decisions to handlers.
+- `cmd/server` - example server that uses the SDK and provides a minimal default behavior
+  implemented with `ServerHandlers` (in-memory queues) for demo and tests.
 - `cmd/publish` - example publisher that uses the official RabbitMQ Go client
   (`github.com/rabbitmq/amqp091-go`) to publish a message to the local server.
 - `Makefile` - convenience targets: `build`, `run`, `test`, `publish`, `clean`.
@@ -66,4 +76,3 @@ Notes
 Contributing
 
 Pull requests are welcome. Please keep changes small and focused.
-
