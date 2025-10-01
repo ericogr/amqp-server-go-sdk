@@ -14,6 +14,7 @@ func main() {
 	addr := flag.String("addr", "amqp://guest:guest@127.0.0.1:5672/", "AMQP URL")
 	exchange := flag.String("exchange", "", "exchange name")
 	key := flag.String("key", "test", "routing key")
+	queue := flag.String("queue", "test-queue", "queue name")
 	body := flag.String("body", "hello", "message body")
 	flag.Parse()
 
@@ -41,6 +42,19 @@ func main() {
 
 	if err := ch.Confirm(false); err != nil {
 		log.Fatalf("channel could not be put into confirm mode: %v", err)
+	}
+
+	// declare exchange and queue and bind (demo of server SDK features)
+	if *exchange != "" {
+		if err := ch.ExchangeDeclare(*exchange, "direct", true, false, false, false, nil); err != nil {
+			log.Fatalf("exchange declare: %v", err)
+		}
+		if _, err := ch.QueueDeclare(*queue, true, false, false, false, nil); err != nil {
+			log.Fatalf("queue declare: %v", err)
+		}
+		if err := ch.QueueBind(*queue, *key, *exchange, false, nil); err != nil {
+			log.Fatalf("queue bind: %v", err)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

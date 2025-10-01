@@ -24,6 +24,8 @@ const (
 
 	classConnection = 10
 	classChannel    = 20
+	classExchange   = 40
+	classQueue      = 50
 	classBasic      = 60
 	classConfirm    = 85
 
@@ -45,6 +47,35 @@ const (
 	methodBasicAck        = 80
 	methodConfirmSelect   = 10
 	methodConfirmSelectOk = 11
+	// exchange methods (class 40)
+	methodExchangeDeclare   = 10
+	methodExchangeDeclareOk = 11
+	methodExchangeDelete    = 20
+	methodExchangeDeleteOk  = 21
+	methodExchangeBind      = 30
+	methodExchangeBindOk    = 31
+
+	// queue methods (class 50)
+	methodQueueDeclare   = 10
+	methodQueueDeclareOk = 11
+	methodQueueBind      = 20
+	methodQueueBindOk    = 21
+	methodQueueDelete    = 40
+	methodQueueDeleteOk  = 41
+
+	// basic methods (class 60)
+	methodBasicQos       = 10
+	methodBasicConsume   = 20
+	methodBasicConsumeOk = 21
+	methodBasicCancel    = 30
+	methodBasicCancelOk  = 31
+	methodBasicReturn    = 50
+	methodBasicDeliver   = 60
+	methodBasicGet       = 70
+	methodBasicGetOk     = 71
+	methodBasicGetEmpty  = 72
+	methodBasicReject    = 90
+	methodBasicNack      = 120
 )
 
 // Frame represents a raw AMQP frame
@@ -150,6 +181,17 @@ func encodeFieldTableEmpty() []byte {
 	return []byte{0, 0, 0, 0}
 }
 
+// shortstr: 1-byte length + bytes
+func encodeShortStr(s string) []byte {
+	if len(s) > 255 {
+		s = s[:255]
+	}
+	b := make([]byte, 1+len(s))
+	b[0] = byte(len(s))
+	copy(b[1:], []byte(s))
+	return b
+}
+
 // Build a connection.start method arguments
 func buildStartArgs() []byte {
 	var buf bytes.Buffer
@@ -198,8 +240,25 @@ func buildContentHeaderPayload(classID uint16, bodySize uint64) []byte {
 // to accept a connection, open a channel and receive basic.publish + content frames.
 // The original Serve kept the simple signature; it now delegates to ServeWithAuth
 // with a nil AuthHandler for backwards compatibility.
-func Serve(addr string, handler func(channel uint16, body []byte) error) error {
-	return ServeWithAuth(addr, handler, nil)
+// ConnContext provides connection-scoped helpers for handlers
+type ConnContext struct {
+	Conn        net.Conn
+	WriteMethod func(channel uint16, classID, methodID uint16, args []byte) error
+	WriteFrame  func(f Frame) error
+}
+
+// ServerHandlers allows the server application to handle protocol operations
+type ServerHandlers struct {
+	OnExchangeDeclare func(ctx ConnContext, channel uint16, exchange, kind string, args []byte) error
+	OnQueueDeclare    func(ctx ConnContext, channel uint16, queue string, args []byte) error
+	OnQueueBind       func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
+	OnBasicConsume    func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
+	OnBasicPublish    func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) error
+	OnBasicGet        func(ctx ConnContext, channel uint16, queue string, noAck bool) (found bool, deliveryTag uint64, body []byte, err error)
+}
+
+func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byte) error) error {
+	return ServeWithAuth(addr, handler, nil, nil)
 }
 
 // AuthHandler is called during the connection handshake when the client
@@ -210,7 +269,7 @@ type AuthHandler func(mechanism string, response []byte) error
 
 // ServeWithAuth starts the server like Serve but allows providing an
 // AuthHandler to validate credentials during the handshake.
-func ServeWithAuth(addr string, handler func(channel uint16, body []byte) error, auth AuthHandler) error {
+func ServeWithAuth(addr string, handler func(ctx ConnContext, channel uint16, body []byte) error, auth AuthHandler, handlers *ServerHandlers) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -221,7 +280,7 @@ func ServeWithAuth(addr string, handler func(channel uint16, body []byte) error,
 		if err != nil {
 			return err
 		}
-		go handleConnWithAuth(conn, handler, auth)
+		go handleConnWithAuth(conn, handler, auth, handlers)
 	}
 }
 
@@ -279,13 +338,13 @@ func parseStartOkArgs(args []byte) (mechanism string, response []byte, locale st
 
 // handleConn is kept as a compatibility wrapper for tests/examples that call it
 // directly. It delegates to handleConnWithAuth with a nil AuthHandler.
-func handleConn(conn net.Conn, handler func(channel uint16, body []byte) error) {
-	handleConnWithAuth(conn, handler, nil)
+func handleConn(conn net.Conn, handler func(ctx ConnContext, channel uint16, body []byte) error) {
+	handleConnWithAuth(conn, handler, nil, nil)
 }
 
 // handleConnWithAuth is the same as the previous handleConn but performs
 // optional authentication using the provided AuthHandler during Start-Ok.
-func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte) error, auth AuthHandler) {
+func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uint16, body []byte) error, auth AuthHandler, handlers *ServerHandlers) {
 	defer conn.Close()
 	// set a deadline for initial header
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -320,6 +379,8 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 			return
 		}
 		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
+		// connection-scoped context for handlers
+		ctx := ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 		if classID == classConnection && methodID == methodConnStartOk {
 			if auth != nil {
 				mech, resp, _, err := parseStartOkArgs(args)
@@ -408,7 +469,34 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 	}
 	channelStates := map[uint16]*channelState{}
 
-	// now handle channel opens and basic.publish
+	// in-memory broker state: exchanges, queues and consumers
+	type binding struct {
+		queue string
+		rkey  string
+	}
+	type exchangeState struct {
+		name     string
+		kind     string
+		bindings []binding
+	}
+	type consumer struct {
+		tag     string
+		channel uint16
+		noAck   bool
+	}
+	type queueState struct {
+		name            string
+		messages        [][]byte
+		consumers       []*consumer
+		nextDeliveryTag uint64
+	}
+
+	exchanges := map[string]*exchangeState{}
+	queues := map[string]*queueState{}
+	// default exchange
+	exchanges[""] = &exchangeState{name: "", kind: "direct", bindings: []binding{}}
+
+	// now handle channel opens and methods
 	for {
 		f, err := ReadFrame(conn)
 		if err != nil {
@@ -457,6 +545,159 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 				fmt.Printf("[server] send method chan=%d class=%d method=%d (channel.close-ok)\n", f.Channel, classChannel, methodChannelCloseOk)
 				continue
 			}
+
+			// exchange.declare (delegate to handlers)
+			if classID == classExchange && methodID == methodExchangeDeclare {
+				// parse args: reserved-1 then exchange shortstr then type shortstr
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				exch := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						exch = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				kind := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						kind = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				if handlers != nil && handlers.OnExchangeDeclare != nil {
+					if err := handlers.OnExchangeDeclare(ctx, f.Channel, exch, kind, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "exchange.declare failed", classExchange, methodExchangeDeclare)
+						return
+					}
+				}
+				if err := WriteMethod(conn, f.Channel, classExchange, methodExchangeDeclareOk, []byte{}); err != nil {
+					fmt.Printf("[server] write exchange.declare-ok error: %v\n", err)
+					return
+				}
+				continue
+			}
+
+			// queue.declare (delegate)
+			if classID == classQueue && methodID == methodQueueDeclare {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				qname := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						qname = string(args[idx+1 : idx+1+l])
+					}
+				}
+				if handlers != nil && handlers.OnQueueDeclare != nil {
+					if err := handlers.OnQueueDeclare(ctx, f.Channel, qname, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "queue.declare failed", classQueue, methodQueueDeclare)
+						return
+					}
+				}
+				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueDeclareOk, []byte{}); err != nil {
+					fmt.Printf("[server] write queue.declare-ok error: %v\n", err)
+					return
+				}
+				continue
+			}
+
+			// queue.bind (delegate)
+			if classID == classQueue && methodID == methodQueueBind {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				qname := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						qname = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				exch := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						exch = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				rkey := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						rkey = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				if handlers != nil && handlers.OnQueueBind != nil {
+					if err := handlers.OnQueueBind(ctx, f.Channel, qname, exch, rkey, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "queue.bind failed", classQueue, methodQueueBind)
+						return
+					}
+				}
+				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueBindOk, []byte{}); err != nil {
+					fmt.Printf("[server] write queue.bind-ok error: %v\n", err)
+					return
+				}
+				continue
+			}
+
+			// basic.consume
+			if classID == classBasic && methodID == methodBasicConsume {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				qname := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						qname = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				consumerTag := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						consumerTag = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				var flags byte
+				if idx < len(args) {
+					flags = args[idx]
+					idx++
+				}
+				// delegate to handler if provided
+				serverTag := consumerTag
+				if handlers != nil && handlers.OnBasicConsume != nil {
+					if st, err := handlers.OnBasicConsume(ctx, f.Channel, qname, consumerTag, flags, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "basic.consume failed", classBasic, methodBasicConsume)
+						return
+					} else if st != "" {
+						serverTag = st
+					}
+				}
+				if serverTag == "" {
+					serverTag = fmt.Sprintf("ctag-%d", time.Now().UnixNano())
+				}
+				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicConsumeOk, encodeShortStr(serverTag)); err != nil {
+					fmt.Printf("[server] write basic.consume-ok error: %v\n", err)
+					return
+				}
+				continue
+			}
+
 			// confirm.select
 			if classID == classConfirm && methodID == methodConfirmSelect {
 				// Put channel into confirm mode. We ignore args (nowait) for simplicity.
@@ -473,6 +714,63 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 					return
 				}
 				fmt.Printf("[server] send method chan=%d class=%d method=%d (confirm.select-ok)\n", f.Channel, classConfirm, methodConfirmSelectOk)
+				continue
+			}
+
+			// basic.get (delegate)
+			if classID == classBasic && methodID == methodBasicGet {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				qname := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						qname = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				// delegate to handler
+				if handlers != nil && handlers.OnBasicGet != nil {
+					found, delTag, msg, err := handlers.OnBasicGet(ctx, f.Channel, qname, false)
+					if err != nil {
+						_ = writeConnectionClose(conn, 504, "basic.get failed", classBasic, methodBasicGet)
+						return
+					}
+					if !found {
+						if err := WriteMethod(conn, f.Channel, classBasic, methodBasicGetEmpty, []byte{}); err != nil {
+							fmt.Printf("[server] write get-empty error: %v\n", err)
+							return
+						}
+						continue
+					}
+					// send get-ok
+					var payload bytes.Buffer
+					payload.Write(encodeLongLong(delTag))
+					payload.WriteByte(0)
+					payload.Write(encodeShortStr(""))
+					payload.Write(encodeShortStr(""))
+					payload.Write(encodeLong(0))
+					if err := WriteMethod(conn, f.Channel, classBasic, methodBasicGetOk, payload.Bytes()); err != nil {
+						fmt.Printf("[server] write get-ok error: %v\n", err)
+						return
+					}
+					if err := WriteFrame(conn, Frame{Type: frameHeader, Channel: f.Channel, Payload: buildContentHeaderPayload(classBasic, uint64(len(msg)))}); err != nil {
+						fmt.Printf("[server] write header error: %v\n", err)
+						return
+					}
+					if err := WriteFrame(conn, Frame{Type: frameBody, Channel: f.Channel, Payload: msg}); err != nil {
+						fmt.Printf("[server] write body error: %v\n", err)
+						return
+					}
+					continue
+				}
+				// default: no handler -> empty
+				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicGetEmpty, []byte{}); err != nil {
+					fmt.Printf("[server] write get-empty error: %v\n", err)
+					return
+				}
 				continue
 			}
 
@@ -527,11 +825,22 @@ func handleConnWithAuth(conn net.Conn, handler func(channel uint16, body []byte)
 					body.Write(bf.Payload)
 					got += uint64(len(bf.Payload))
 				}
-				// invoke handler
-				_ = handler(f.Channel, body.Bytes())
 
-				// determine ack behavior: if channel is in confirm mode send a
-				// publisher-confirm Basic.Ack with an incrementing delivery tag
+				// invoke handler (backwards compatibility) - pass ConnContext
+				ctx := ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
+				if handler != nil {
+					_ = handler(ctx, f.Channel, body.Bytes())
+				}
+
+				// delegate basic.publish processing to handlers if provided
+				if handlers != nil && handlers.OnBasicPublish != nil {
+					if err := handlers.OnBasicPublish(ctx, f.Channel, exch, rkey, hf.Payload, body.Bytes()); err != nil {
+						_ = writeConnectionClose(conn, 504, "basic.publish handler failed", classBasic, methodBasicPublish)
+						return
+					}
+				}
+
+				// determine ack behavior for the publishing channel
 				st, ok := channelStates[f.Channel]
 				if ok && st.confirming {
 					st.publishSeq++
