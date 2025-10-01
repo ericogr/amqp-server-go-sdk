@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/ericogr/amqp-test/pkg/amqp"
 )
@@ -131,8 +132,8 @@ func main() {
 			dar.WriteByte(0)
 			dar.Write(encodeShortStr(""))
 			dar.Write(encodeShortStr(""))
-			_ = c.writeMeth(c.channel, classBasic, methodBasicDeliver, dar.Bytes())
-			_ = c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(classBasic, uint64(len(msg)))})
+			_ = c.writeMeth(c.channel, 60, 60, dar.Bytes())
+			_ = c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(msg)))})
 			_ = c.writeFrm(amqp.Frame{Type: 3, Channel: c.channel, Payload: msg})
 		}
 		return consumerTag, nil
@@ -154,8 +155,8 @@ func main() {
 					dar.WriteByte(0)
 					dar.Write(encodeShortStr(exchange))
 					dar.Write(encodeShortStr(rkey))
-					_ = c.writeMeth(c.channel, classBasic, methodBasicDeliver, dar.Bytes())
-					_ = c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(classBasic, uint64(len(body)))})
+					_ = c.writeMeth(c.channel, 60, 60, dar.Bytes())
+					_ = c.writeFrm(amqp.Frame{Type: 2, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
 					_ = c.writeFrm(amqp.Frame{Type: 3, Channel: c.channel, Payload: body})
 					return nil
 				}

@@ -1,8 +1,11 @@
 package amqp
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -410,7 +413,86 @@ func TestQueueDeclareConsumeFlow(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleConn(sConn, func(ctx ConnContext, channel uint16, body []byte) error { return nil })
+		// create default handlers for this test (in-memory)
+		var mu sync.Mutex
+		type consumer struct {
+			tag     string
+			channel uint16
+			write   func(channel uint16, classID, methodID uint16, args []byte) error
+			writeF  func(f Frame) error
+		}
+		type qstate struct {
+			name            string
+			messages        [][]byte
+			consumers       []*consumer
+			nextDeliveryTag uint64
+		}
+		queues := map[string]*qstate{}
+		handlers := &ServerHandlers{}
+		handlers.OnQueueDeclare = func(ctx ConnContext, channel uint16, queue string, args []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if _, ok := queues[queue]; !ok {
+				queues[queue] = &qstate{name: queue, messages: make([][]byte, 0), consumers: make([]*consumer, 0), nextDeliveryTag: 0}
+			}
+			return nil
+		}
+		handlers.OnBasicConsume = func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if _, ok := queues[queue]; !ok {
+				queues[queue] = &qstate{name: queue, messages: make([][]byte, 0), consumers: make([]*consumer, 0), nextDeliveryTag: 0}
+			}
+			if consumerTag == "" {
+				consumerTag = fmt.Sprintf("ctag-%d", time.Now().UnixNano())
+			}
+			c := &consumer{tag: consumerTag, channel: channel, write: ctx.WriteMethod, writeF: ctx.WriteFrame}
+			queues[queue].consumers = append(queues[queue].consumers, c)
+			if len(queues[queue].messages) > 0 {
+				msg := queues[queue].messages[0]
+				queues[queue].messages = queues[queue].messages[1:]
+				queues[queue].nextDeliveryTag++
+				delTag := queues[queue].nextDeliveryTag
+				var dar bytes.Buffer
+				dar.Write(encodeShortStr(consumerTag))
+				dar.Write(encodeLongLong(delTag))
+				dar.WriteByte(0)
+				dar.Write(encodeShortStr(""))
+				dar.Write(encodeShortStr(""))
+				_ = c.write(c.channel, 60, 60, dar.Bytes())
+				_ = c.writeF(Frame{Type: frameHeader, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(msg)))})
+				_ = c.writeF(Frame{Type: frameBody, Channel: c.channel, Payload: msg})
+			}
+			return consumerTag, nil
+		}
+		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if exchange == "" {
+				if q, ok := queues[rkey]; ok {
+					if len(q.consumers) > 0 {
+						c := q.consumers[0]
+						q.nextDeliveryTag++
+						delTag := q.nextDeliveryTag
+						var dar bytes.Buffer
+						dar.Write(encodeShortStr(c.tag))
+						dar.Write(encodeLongLong(delTag))
+						dar.WriteByte(0)
+						dar.Write(encodeShortStr(exchange))
+						dar.Write(encodeShortStr(rkey))
+						_ = c.write(c.channel, 60, 60, dar.Bytes())
+						_ = c.writeF(Frame{Type: frameHeader, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
+						_ = c.writeF(Frame{Type: frameBody, Channel: c.channel, Payload: body})
+						return nil
+					}
+					q.messages = append(q.messages, append([]byte(nil), body...))
+					return nil
+				}
+				return nil
+			}
+			return nil
+		}
+		handleConnWithAuth(sConn, func(ctx ConnContext, channel uint16, body []byte) error { return nil }, nil, handlers)
 		close(done)
 	}()
 
@@ -553,7 +635,70 @@ func TestBasicGetFlow(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleConn(sConn, func(ctx ConnContext, channel uint16, body []byte) error { return nil })
+		var mu sync.Mutex
+		type consumer struct {
+			tag     string
+			channel uint16
+			write   func(channel uint16, classID, methodID uint16, args []byte) error
+			writeF  func(f Frame) error
+		}
+		type qstate struct {
+			name            string
+			messages        [][]byte
+			consumers       []*consumer
+			nextDeliveryTag uint64
+		}
+		queues := map[string]*qstate{}
+		handlers := &ServerHandlers{}
+		handlers.OnQueueDeclare = func(ctx ConnContext, channel uint16, queue string, args []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if _, ok := queues[queue]; !ok {
+				queues[queue] = &qstate{name: queue, messages: make([][]byte, 0), consumers: make([]*consumer, 0), nextDeliveryTag: 0}
+			}
+			return nil
+		}
+		handlers.OnBasicPublish = func(ctx ConnContext, channel uint16, exchange, rkey string, properties []byte, body []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if exchange == "" {
+				if q, ok := queues[rkey]; ok {
+					if len(q.consumers) > 0 {
+						c := q.consumers[0]
+						q.nextDeliveryTag++
+						delTag := q.nextDeliveryTag
+						var dar bytes.Buffer
+						dar.Write(encodeShortStr(c.tag))
+						dar.Write(encodeLongLong(delTag))
+						dar.WriteByte(0)
+						dar.Write(encodeShortStr(exchange))
+						dar.Write(encodeShortStr(rkey))
+						_ = c.write(c.channel, 60, 60, dar.Bytes())
+						_ = c.writeF(Frame{Type: frameHeader, Channel: c.channel, Payload: buildContentHeaderPayload(60, uint64(len(body)))})
+						_ = c.writeF(Frame{Type: frameBody, Channel: c.channel, Payload: body})
+						return nil
+					}
+					q.messages = append(q.messages, append([]byte(nil), body...))
+					return nil
+				}
+				return nil
+			}
+			return nil
+		}
+		handlers.OnBasicGet = func(ctx ConnContext, channel uint16, queue string, noAck bool) (bool, uint64, []byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			q, ok := queues[queue]
+			if !ok || len(q.messages) == 0 {
+				return false, 0, nil, nil
+			}
+			msg := q.messages[0]
+			q.messages = q.messages[1:]
+			q.nextDeliveryTag++
+			delTag := q.nextDeliveryTag
+			return true, delTag, msg, nil
+		}
+		handleConnWithAuth(sConn, func(ctx ConnContext, channel uint16, body []byte) error { return nil }, nil, handlers)
 		close(done)
 	}()
 

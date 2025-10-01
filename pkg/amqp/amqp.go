@@ -364,6 +364,9 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		return
 	}
 
+	// connection-scoped context for handlers (declare early)
+	var ctx ConnContext
+
 	// read frames until we see Start-Ok (class 10 method 11). If auth is
 	// provided, parse mechanism/response and call it; if auth fails, close.
 	for {
@@ -379,8 +382,8 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 			return
 		}
 		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
-		// connection-scoped context for handlers
-		ctx := ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
+		// build connection-scoped context for handlers
+		ctx = ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 		if classID == classConnection && methodID == methodConnStartOk {
 			if auth != nil {
 				mech, resp, _, err := parseStartOkArgs(args)
@@ -469,32 +472,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 	}
 	channelStates := map[uint16]*channelState{}
 
-	// in-memory broker state: exchanges, queues and consumers
-	type binding struct {
-		queue string
-		rkey  string
-	}
-	type exchangeState struct {
-		name     string
-		kind     string
-		bindings []binding
-	}
-	type consumer struct {
-		tag     string
-		channel uint16
-		noAck   bool
-	}
-	type queueState struct {
-		name            string
-		messages        [][]byte
-		consumers       []*consumer
-		nextDeliveryTag uint64
-	}
-
-	exchanges := map[string]*exchangeState{}
-	queues := map[string]*queueState{}
-	// default exchange
-	exchanges[""] = &exchangeState{name: "", kind: "direct", bindings: []binding{}}
+	// No in-memory broker state in SDK: delegate behavior to ServerHandlers.
 
 	// now handle channel opens and methods
 	for {
@@ -826,8 +804,8 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					got += uint64(len(bf.Payload))
 				}
 
-				// invoke handler (backwards compatibility) - pass ConnContext
-				ctx := ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
+				// build connection-scoped context for handlers
+				ctx = ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
 				if handler != nil {
 					_ = handler(ctx, f.Channel, body.Bytes())
 				}
