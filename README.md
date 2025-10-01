@@ -1,4 +1,4 @@
-# Minimal AMQP 0-9-1 Server and SDK (Go)
+# Minimal AMQP 0-9-1 Server SDK (Go)
 
 This repository contains a minimal, educational implementation of parts of the AMQP 0-9-1
 wire protocol in Go and a tiny example server that accepts `basic.publish` messages.
