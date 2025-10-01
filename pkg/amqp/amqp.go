@@ -60,6 +60,8 @@ const (
 	methodQueueDeclareOk = 11
 	methodQueueBind      = 20
 	methodQueueBindOk    = 21
+	methodQueuePurge     = 30
+	methodQueuePurgeOk   = 31
 	methodQueueDelete    = 40
 	methodQueueDeleteOk  = 41
 
@@ -280,6 +282,7 @@ type ServerHandlers struct {
 	OnExchangeDelete  func(ctx ConnContext, channel uint16, exchange string, args []byte) error
 	OnQueueDeclare    func(ctx ConnContext, channel uint16, queue string, args []byte) error
 	OnQueueDelete     func(ctx ConnContext, channel uint16, queue string, args []byte) error
+	OnQueuePurge      func(ctx ConnContext, channel uint16, queue string, args []byte) (int, error)
 	OnQueueBind       func(ctx ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error
 	OnBasicConsume    func(ctx ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (serverTag string, err error)
 	// OnBasicPublish returns (nack, err). If nack==true and the channel is in confirm mode
@@ -726,6 +729,37 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				if err := WriteMethod(conn, f.Channel, classQueue, methodQueueBindOk, []byte{}); err != nil {
 					fmt.Printf("[server] write queue.bind-ok error: %v\n", err)
+					return
+				}
+				continue
+			}
+
+			// queue.purge (delegate)
+			if classID == classQueue && methodID == methodQueuePurge {
+				idx := 0
+				if len(args) >= 2 {
+					idx = 2
+				}
+				qname := ""
+				if idx < len(args) {
+					l := int(args[idx])
+					if idx+1+l <= len(args) {
+						qname = string(args[idx+1 : idx+1+l])
+						idx = idx + 1 + l
+					}
+				}
+				var msgCount int
+				if handlers != nil && handlers.OnQueuePurge != nil {
+					if c, err := handlers.OnQueuePurge(ctx, f.Channel, qname, args); err != nil {
+						_ = writeConnectionClose(conn, 504, "queue.purge failed", classQueue, methodQueuePurge)
+						return
+					} else {
+						msgCount = c
+					}
+				}
+				// queue.purge-ok: message-count (long)
+				if err := WriteMethod(conn, f.Channel, classQueue, methodQueuePurgeOk, encodeLong(uint32(msgCount))); err != nil {
+					fmt.Printf("[server] write queue.purge-ok error: %v\n", err)
 					return
 				}
 				continue

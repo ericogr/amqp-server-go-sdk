@@ -281,6 +281,112 @@ func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
 	}
 }
 
+func TestServerDelegatesQueuePurge(t *testing.T) {
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
+
+	var got bool
+	ch := make(chan struct{}, 1)
+
+	handlers := &ServerHandlers{}
+	handlers.OnQueuePurge = func(ctx ConnContext, channel uint16, queue string, args []byte) (int, error) {
+		got = true
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+		return 7, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
+
+	// handshake + open channel
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	if err := WriteMethod(cConn, 0, 10, 40, []byte{}); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	}
+	// open channel
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
+
+	// send queue.purge
+	if err := WriteMethod(cConn, 1, classQueue, methodQueuePurge, append(encodeShort(0), encodeShortStr("q1")...)); err != nil {
+		t.Fatalf("write queue.purge: %v", err)
+	}
+	// read purge-ok
+	f, err := ReadFrame(cConn)
+	if err != nil {
+		t.Fatalf("read purge-ok: %v", err)
+	}
+	ci, mi, args, err := ParseMethod(f.Payload)
+	if err != nil {
+		t.Fatalf("parse purge-ok: %v", err)
+	}
+	if ci != classQueue || mi != methodQueuePurgeOk {
+		t.Fatalf("expected queue.purge-ok got %d:%d", ci, mi)
+	}
+	if len(args) < 4 {
+		t.Fatalf("purge-ok args too short")
+	}
+	cnt := binary.BigEndian.Uint32(args[0:4])
+	if cnt != 7 {
+		t.Fatalf("expected purge count 7 got %d", cnt)
+	}
+
+	// wait for handler
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("OnQueuePurge not called")
+	}
+
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
+
+	if !got {
+		t.Fatalf("handler not invoked")
+	}
+}
+
 func TestServePublishConfirmWithNack(t *testing.T) {
 	sConn, cConn := net.Pipe()
 	defer sConn.Close()

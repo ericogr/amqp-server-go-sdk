@@ -18,6 +18,7 @@ func main() {
 	body := flag.String("body", "hello", "message body")
 	deleteExchange := flag.Bool("delete-exchange", false, "delete exchange after publish")
 	deleteQueue := flag.Bool("delete-queue", false, "delete queue after publish")
+	purgeQueue := flag.Bool("purge-queue", false, "purge queue after publish")
 	flag.Parse()
 
 	conn, err := amqp091.Dial(*addr)
@@ -102,6 +103,14 @@ func main() {
 			log.Printf("queue delete: %v", err)
 		} else {
 			fmt.Println("queue deleted")
+		}
+	}
+
+	if *purgeQueue && *queue != "" {
+		if cnt, err := ch.QueuePurge(*queue, false); err != nil {
+			log.Printf("queue purge: %v", err)
+		} else {
+			fmt.Printf("queue purged: %d messages\n", cnt)
 		}
 	}
 }

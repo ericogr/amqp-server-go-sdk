@@ -112,6 +112,18 @@ func main() {
 		return nil
 	}
 
+	handlers.OnQueuePurge = func(ctx amqp.ConnContext, channel uint16, queue string, args []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if q, ok := queues[queue]; ok {
+			cnt := len(q.messages)
+			q.messages = make([][]byte, 0)
+			fmt.Printf("queue purged: %q count=%d\n", queue, cnt)
+			return cnt, nil
+		}
+		return 0, nil
+	}
+
 	handlers.OnQueueBind = func(ctx amqp.ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
