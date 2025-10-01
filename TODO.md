@@ -29,7 +29,7 @@ status value and a short inline note describing the current state when relevant.
 | Basic (60) | `Deliver` (server→client) | Implemented | SDK sends `basic.deliver` frames; delivery behavior is the responsibility of the handler.
 | Basic (60) | `Consume` / `Consume-Ok` | Implemented | Delegated to `ServerHandlers.OnBasicConsume`; `consume-ok` is sent.
 | Basic (60) | `Get` / `Get-Ok` / `Get-Empty` | Implemented | Delegated to `ServerHandlers.OnBasicGet`.
-| Basic (60) | `Ack` (consumer→server ack) | Not implemented | Consumer acknowledgements (client→server) for consumption are not delegated; SDK uses acks for publisher confirms.
+| Basic (60) | `Ack` (consumer→server ack) | Implemented | Delegated to `ServerHandlers.OnBasicAck(ctx, channel, deliveryTag, multiple)`; parses delivery-tag (longlong) and `multiple` flag.
 | Basic (60) | `Nack` / `Reject` | Implemented | Client notifications delegated via `OnBasicNack`/`OnBasicReject`; server can send `basic.nack` for publishes based on handler.
 | Basic (60) | `Return` (mandatory/immediate) | Not implemented | Returning unroutable messages to publisher not implemented.
 | Basic (60) | `Qos` / `Qos-Ok` | Not implemented | Prefetch/QoS not implemented.

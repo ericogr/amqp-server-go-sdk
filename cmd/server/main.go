@@ -237,6 +237,11 @@ func main() {
 		return nil
 	}
 
+	handlers.OnBasicAck = func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool) error {
+		fmt.Printf("client basic.ack chan=%d tag=%d multiple=%v vhost=%q tls=%v\n", channel, deliveryTag, multiple, ctx.Vhost, ctx.TLSState != nil)
+		return nil
+	}
+
 	handlers.OnBasicGet = func(ctx amqp.ConnContext, channel uint16, queue string, noAck bool) (bool, uint64, []byte, error) {
 		mu.Lock()
 		defer mu.Unlock()

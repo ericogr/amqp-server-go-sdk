@@ -333,6 +333,7 @@ type ServerHandlers struct {
 	// Incoming client-to-server notifications
 	OnBasicNack   func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error
 	OnBasicReject func(ctx ConnContext, channel uint16, deliveryTag uint64, requeue bool) error
+	OnBasicAck    func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool) error
 }
 
 func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byte) error) error {
@@ -641,6 +642,29 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 				if handlers != nil && handlers.OnBasicReject != nil {
 					_ = handlers.OnBasicReject(ctx, f.Channel, dtag, requeue)
+				}
+				continue
+			}
+
+			// handle incoming client Basic.Ack (class 60 method 80)
+			if classID == classBasic && methodID == methodBasicAck {
+				if len(args) < 9 {
+					// legacy servers may send just 8 bytes (delivery-tag) without flags
+					if len(args) >= 8 {
+						dtag := binary.BigEndian.Uint64(args[0:8])
+						if handlers != nil && handlers.OnBasicAck != nil {
+							_ = handlers.OnBasicAck(ctx, f.Channel, dtag, false)
+						}
+					}
+					continue
+				}
+				dtag := binary.BigEndian.Uint64(args[0:8])
+				var multiple bool
+				if len(args) >= 9 && args[8]&1 == 1 {
+					multiple = true
+				}
+				if handlers != nil && handlers.OnBasicAck != nil {
+					_ = handlers.OnBasicAck(ctx, f.Channel, dtag, multiple)
 				}
 				continue
 			}
