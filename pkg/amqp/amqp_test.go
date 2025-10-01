@@ -289,6 +289,90 @@ func TestServerDelegatesExchangeQueueDelete(t *testing.T) {
 	}
 }
 
+func TestConnContextIncludesVhost(t *testing.T) {
+	sConn, cConn := net.Pipe()
+	defer sConn.Close()
+	defer cConn.Close()
+
+	handlers := &ServerHandlers{}
+	handlers.OnQueueDeclare = func(ctx ConnContext, channel uint16, queue string, args []byte) error {
+		if ctx.Vhost != "myvhost" {
+			t.Fatalf("expected vhost=myvhost got=%q", ctx.Vhost)
+		}
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		handleConnWithAuth(sConn, nil, nil, handlers)
+		close(done)
+	}()
+
+	// handshake: send header
+	hdr := []byte{'A', 'M', 'Q', 'P', 0, 0, 9, 1}
+	if _, err := cConn.Write(hdr); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	// read start
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read start: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse start: %v", err)
+		}
+	}
+	// send Start-Ok
+	if err := WriteMethod(cConn, 0, 10, 11, []byte{}); err != nil {
+		t.Fatalf("write start-ok: %v", err)
+	}
+	// read Tune
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read tune: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse tune: %v", err)
+		}
+	}
+	// send Tune-Ok
+	if err := WriteMethod(cConn, 0, 10, 31, []byte{}); err != nil {
+		t.Fatalf("write tune-ok: %v", err)
+	}
+	// send Connection.Open with vhost
+	openArgs := append([]byte{}, encodeShortStr("myvhost")...)
+	if err := WriteMethod(cConn, 0, 10, 40, openArgs); err != nil {
+		t.Fatalf("write open: %v", err)
+	}
+	// read Open-Ok
+	if f, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read open-ok: %v", err)
+	} else {
+		if _, _, _, err := ParseMethod(f.Payload); err != nil {
+			t.Fatalf("parse open-ok: %v", err)
+		}
+	}
+	// open channel
+	if err := WriteMethod(cConn, 1, 20, 10, []byte{}); err != nil {
+		t.Fatalf("write channel.open: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read channel.open-ok: %v", err)
+	}
+	// declare queue to trigger handler
+	if err := WriteMethod(cConn, 1, classQueue, methodQueueDeclare, append(encodeShort(0), encodeShortStr("qtest")...)); err != nil {
+		t.Fatalf("write queue.declare: %v", err)
+	}
+	if _, err := ReadFrame(cConn); err != nil {
+		t.Fatalf("read queue.declare-ok: %v", err)
+	}
+
+	cConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("server did not exit")
+	}
+}
+
 func TestServerDelegatesQueuePurge(t *testing.T) {
 	sConn, cConn := net.Pipe()
 	defer sConn.Close()

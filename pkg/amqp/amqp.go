@@ -272,6 +272,7 @@ func buildContentHeaderPayload(classID uint16, bodySize uint64) []byte {
 // ConnContext provides connection-scoped helpers for handlers
 type ConnContext struct {
 	Conn        net.Conn
+	Vhost       string
 	WriteMethod func(channel uint16, classID, methodID uint16, args []byte) error
 	WriteFrame  func(f Frame) error
 }
@@ -304,11 +305,12 @@ func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byt
 	return ServeWithAuth(addr, handler, nil, nil)
 }
 
-// AuthHandler is called during the connection handshake when the client
-// sends Connection.Start-Ok. The handler receives the selected SASL
-// mechanism and the raw response bytes. If the handler returns a non-nil
-// error the server will close the connection.
-type AuthHandler func(mechanism string, response []byte) error
+// AuthHandler is called during the connection handshake to validate
+// credentials. The handler receives the selected SASL mechanism, the raw
+// response bytes (from Start-Ok) and the requested virtual-host (vhost)
+// supplied in Connection.Open. If the handler returns a non-nil error the
+// server will close the connection.
+type AuthHandler func(mechanism string, response []byte, vhost string) error
 
 // ServeWithAuth starts the server like Serve but allows providing an
 // AuthHandler to validate credentials during the handshake.
@@ -409,9 +411,16 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 
 	// connection-scoped context for handlers (declare early)
 	var ctx ConnContext
+	// populated after Connection.Open
+	var vhost string
+	// authentication info parsed from Start-Ok (if auth handler provided)
+	var authMech string
+	var authResp []byte
 
 	// read frames until we see Start-Ok (class 10 method 11). If auth is
-	// provided, parse mechanism/response and call it; if auth fails, close.
+	// provided, parse mechanism/response and store them; actual authentication
+	// will be performed after Connection.Open so the handler receives the
+	// requested vhost as well.
 	for {
 		f, err := ReadFrame(conn)
 		if err != nil {
@@ -426,7 +435,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		}
 		fmt.Printf("[server] recv method chan=%d class=%d method=%d args=%d\n", f.Channel, classID, methodID, len(args))
 		// build connection-scoped context for handlers
-		ctx = ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
+		ctx = ConnContext{Conn: conn, Vhost: vhost, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 		if classID == classConnection && methodID == methodConnStartOk {
 			if auth != nil {
 				mech, resp, _, err := parseStartOkArgs(args)
@@ -436,11 +445,9 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					_ = writeConnectionClose(conn, 540, "Malformed start-ok", 0, 0)
 					return
 				}
-				if err := auth(mech, resp); err != nil {
-					// authentication failed: send Connection.Close and return
-					_ = writeConnectionClose(conn, 403, "ACCESS_REFUSED", classConnection, methodConnStartOk)
-					return
-				}
+				// store mech/resp to use after Connection.Open when vhost is known
+				authMech = mech
+				authResp = append([]byte(nil), resp...)
 			}
 			break
 		}
@@ -488,7 +495,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		if classID == classConnection && methodID == methodConnOpen {
 			// client requested connection.open
 			// parse virtual-host (path = shortstr)
-			vhost := ""
+			vhost = ""
 			if len(args) > 0 {
 				l := int(args[0])
 				if 1+l <= len(args) {
@@ -496,12 +503,26 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 			}
 			fmt.Printf("[server] connection.open vhost=%q\n", vhost)
+			// if an auth handler was provided, run it now that we know the vhost
+			if auth != nil {
+				if authMech == "" {
+					// client did not provide Start-Ok credentials
+					_ = writeConnectionClose(conn, 540, "Missing start-ok", 0, 0)
+					return
+				}
+				if err := auth(authMech, authResp, vhost); err != nil {
+					_ = writeConnectionClose(conn, 403, "ACCESS_REFUSED", classConnection, methodConnStartOk)
+					return
+				}
+			}
 			// connection.open-ok expects a shortstr reserved-1 (empty)
 			if err := WriteMethod(conn, 0, classConnection, methodConnOpenOk, []byte{0}); err != nil {
 				fmt.Printf("[server] write open-ok error: %v\n", err)
 				return
 			}
 			fmt.Printf("[server] send method chan=0 class=%d method=%d (open-ok)\n", classConnection, methodConnOpenOk)
+			// update connection-scoped context with negotiated vhost
+			ctx = ConnContext{Conn: conn, Vhost: vhost, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(fr Frame) error { return WriteFrame(conn, fr) }}
 			// clear deadline after handshake
 			conn.SetDeadline(time.Time{})
 			break
@@ -1010,7 +1031,7 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 				}
 
 				// build connection-scoped context for handlers
-				ctx = ConnContext{Conn: conn, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
+				ctx = ConnContext{Conn: conn, Vhost: vhost, WriteMethod: func(ch, cid, mid uint16, a []byte) error { return WriteMethod(conn, ch, cid, mid, a) }, WriteFrame: func(f Frame) error { return WriteFrame(conn, f) }}
 				if handler != nil {
 					_ = handler(ctx, f.Channel, body.Bytes())
 				}

@@ -228,7 +228,8 @@ func main() {
 	}
 
 	// simple auth handler: accept PLAIN guest:guest
-	auth := func(mechanism string, response []byte) error {
+	// now receives the requested `vhost` as third parameter
+	auth := func(mechanism string, response []byte, vhost string) error {
 		if mechanism != "PLAIN" {
 			return fmt.Errorf("unsupported mechanism %q", mechanism)
 		}
@@ -247,8 +248,7 @@ func main() {
 		if username != "guest" || password != "guest" {
 			return fmt.Errorf("invalid credentials")
 		}
-
-		fmt.Printf("user %s authentication successful\n", username)
+		fmt.Printf("user %s authentication successful vhost=%s\n", username, vhost)
 
 		return nil
 	}
