@@ -1,146 +1,177 @@
 package main
 
 import (
-	"context"
-	"crypto/tls"
-	"flag"
-	"os"
-	"time"
+    "context"
+    "crypto/tls"
+    "flag"
+    "os"
+    "time"
 
-	"github.com/rs/zerolog"
+    "github.com/rs/zerolog"
 
-	amqp091 "github.com/rabbitmq/amqp091-go"
+    amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
-func main() {
-	addr := flag.String("addr", "amqps://guest:guest@127.0.0.1:5671/", "AMQP URL")
-	exchange := flag.String("exchange", "", "exchange name")
-	key := flag.String("key", "test", "routing key")
-	queue := flag.String("queue", "test-queue", "queue name")
-	body := flag.String("body", "hello", "message body")
-	deleteExchange := flag.Bool("delete-exchange", false, "delete exchange after publish")
-	deleteQueue := flag.Bool("delete-queue", false, "delete queue after publish")
-	purgeQueue := flag.Bool("purge-queue", false, "purge queue after publish")
-	bindExchangeSource := flag.String("bind-exchange-source", "", "source exchange to bind from")
-	bindExchangeDest := flag.String("bind-exchange-dest", "", "destination exchange to bind to")
-	bindExchangeKey := flag.String("bind-exchange-key", "", "routing key for exchange bind")
-	unbindExchangeSource := flag.String("unbind-exchange-source", "", "source exchange to unbind from")
-	unbindExchangeDest := flag.String("unbind-exchange-dest", "", "destination exchange to unbind")
-	unbindExchangeKey := flag.String("unbind-exchange-key", "", "routing key for exchange unbind")
-	flag.Parse()
-
-	// configure logger
-	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
-
-	// dial using TLS (insecure skip verify for demo/self-signed certs)
-	tlsCfg := &tls.Config{InsecureSkipVerify: true}
-	conn, err := amqp091.DialTLS(*addr, tlsCfg)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("dial")
-	}
-	defer func() {
-		logger.Info().Msg("closing connection")
-		conn.Close()
-		logger.Info().Msg("connection closed")
-	}()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		logger.Fatal().Err(err).Msg("channel")
-	}
-	defer func() {
-		logger.Info().Msg("closing channel")
-		ch.Close()
-		logger.Info().Msg("channel closed")
-	}()
-
-	logger.Info().Msg("publishing")
-
-	if err := ch.Confirm(false); err != nil {
-		logger.Fatal().Err(err).Msg("channel could not be put into confirm mode")
-	}
-
-	// declare exchange and queue and bind (demo of server SDK features)
-	if *exchange != "" {
-		if err := ch.ExchangeDeclare(*exchange, "direct", true, false, false, false, nil); err != nil {
-			logger.Fatal().Err(err).Msg("exchange declare")
-		}
-		if _, err := ch.QueueDeclare(*queue, true, false, false, false, nil); err != nil {
-			logger.Fatal().Err(err).Msg("queue declare")
-		}
-		if err := ch.QueueBind(*queue, *key, *exchange, false, nil); err != nil {
-			logger.Fatal().Err(err).Msg("queue bind")
-		}
-		// optionally bind exchanges
-		if *bindExchangeSource != "" && *bindExchangeDest != "" {
-			if err := ch.ExchangeBind(*bindExchangeDest, *bindExchangeKey, *bindExchangeSource, false, nil); err != nil {
-				logger.Error().Err(err).Msg("exchange bind")
-			} else {
-				logger.Info().Str("dest", *bindExchangeDest).Str("source", *bindExchangeSource).Str("key", *bindExchangeKey).Msg("exchange bind")
-			}
-		}
-	}
-
-	// optionally unbind an exchange if flags provided (demo)
-	if *unbindExchangeSource != "" && *unbindExchangeDest != "" {
-		if err := ch.ExchangeUnbind(*unbindExchangeDest, *unbindExchangeKey, *unbindExchangeSource, false, nil); err != nil {
-			logger.Error().Err(err).Msg("exchange unbind")
-		} else {
-			logger.Info().Str("dest", *unbindExchangeDest).Str("source", *unbindExchangeSource).Str("key", *unbindExchangeKey).Msg("exchange unbound")
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	dConfirm, err := ch.PublishWithDeferredConfirmWithContext(ctx,
-		*exchange,
-		*key,
-		false,
-		false,
-		amqp091.Publishing{
-			ContentType: "text/plain",
-			Body:        []byte(*body),
-		},
-	)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("publish")
-	}
-
-	// Wait for the server to confirm the publish. Wait() will return true on ack.
-	if dConfirm == nil {
-		// not in confirm mode
-		logger.Info().Msg("published (no confirm mode)")
-		return
-	}
-
-	if ok := dConfirm.Wait(); ok {
-		logger.Info().Msg("published and confirmed")
-	} else {
-		logger.Fatal().Msg("publish was not acknowledged or timed out")
-	}
-
-	// optionally delete exchange / queue as a demo of server delete handling
-	if *deleteExchange && *exchange != "" {
-		if err := ch.ExchangeDelete(*exchange, false, false); err != nil {
-			logger.Error().Err(err).Msg("exchange delete")
-		} else {
-			logger.Info().Msg("exchange deleted")
-		}
-	}
-	if *deleteQueue && *queue != "" {
-		if _, err := ch.QueueDelete(*queue, false, false, false); err != nil {
-			logger.Error().Err(err).Msg("queue delete")
-		} else {
-			logger.Info().Msg("queue deleted")
-		}
-	}
-
-	if *purgeQueue && *queue != "" {
-		if cnt, err := ch.QueuePurge(*queue, false); err != nil {
-			logger.Error().Err(err).Msg("queue purge")
-		} else {
-			logger.Info().Int("purged_messages", cnt).Msg("queue purged")
-		}
-	}
+type publishConfig struct {
+    Addr                string
+    Exchange            string
+    Key                 string
+    Queue               string
+    Body                string
+    DeleteExchange      bool
+    DeleteQueue         bool
+    PurgeQueue          bool
+    BindExchangeSource  string
+    BindExchangeDest    string
+    BindExchangeKey     string
+    UnbindExchangeSource string
+    UnbindExchangeDest   string
+    UnbindExchangeKey    string
 }
+
+func parsePublishConfig() publishConfig {
+    var c publishConfig
+    flag.StringVar(&c.Addr, "addr", "amqps://guest:guest@127.0.0.1:5671/", "AMQP URL")
+    flag.StringVar(&c.Exchange, "exchange", "", "exchange name")
+    flag.StringVar(&c.Key, "key", "test", "routing key")
+    flag.StringVar(&c.Queue, "queue", "test-queue", "queue name")
+    flag.StringVar(&c.Body, "body", "hello", "message body")
+    flag.BoolVar(&c.DeleteExchange, "delete-exchange", false, "delete exchange after publish")
+    flag.BoolVar(&c.DeleteQueue, "delete-queue", false, "delete queue after publish")
+    flag.BoolVar(&c.PurgeQueue, "purge-queue", false, "purge queue after publish")
+    flag.StringVar(&c.BindExchangeSource, "bind-exchange-source", "", "source exchange to bind from")
+    flag.StringVar(&c.BindExchangeDest, "bind-exchange-dest", "", "destination exchange to bind to")
+    flag.StringVar(&c.BindExchangeKey, "bind-exchange-key", "", "routing key for exchange bind")
+    flag.StringVar(&c.UnbindExchangeSource, "unbind-exchange-source", "", "source exchange to unbind from")
+    flag.StringVar(&c.UnbindExchangeDest, "unbind-exchange-dest", "", "destination exchange to unbind")
+    flag.StringVar(&c.UnbindExchangeKey, "unbind-exchange-key", "", "routing key for exchange unbind")
+    flag.Parse()
+    return c
+}
+
+func newLogger() zerolog.Logger {
+    return zerolog.New(os.Stderr).With().Timestamp().Logger()
+}
+
+func openConnectionAndChannel(addr string, logger zerolog.Logger) (*amqp091.Connection, *amqp091.Channel) {
+    tlsCfg := &tls.Config{InsecureSkipVerify: true}
+    conn, err := amqp091.DialTLS(addr, tlsCfg)
+    if err != nil {
+        logger.Fatal().Err(err).Msg("dial")
+    }
+
+    ch, err := conn.Channel()
+    if err != nil {
+        conn.Close()
+        logger.Fatal().Err(err).Msg("channel")
+    }
+    return conn, ch
+}
+
+func ensureExchangeAndQueue(ch *amqp091.Channel, exchange, queue, key string, logger zerolog.Logger) {
+    if exchange == "" {
+        return
+    }
+    if err := ch.ExchangeDeclare(exchange, "direct", true, false, false, false, nil); err != nil {
+        logger.Fatal().Err(err).Msg("exchange declare")
+    }
+    if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+        logger.Fatal().Err(err).Msg("queue declare")
+    }
+    if err := ch.QueueBind(queue, key, exchange, false, nil); err != nil {
+        logger.Fatal().Err(err).Msg("queue bind")
+    }
+}
+
+func optionalBind(ch *amqp091.Channel, dest, source, key string, logger zerolog.Logger) {
+    if source == "" || dest == "" {
+        return
+    }
+    if err := ch.ExchangeBind(dest, key, source, false, nil); err != nil {
+        logger.Error().Err(err).Msg("exchange bind")
+    } else {
+        logger.Info().Str("dest", dest).Str("source", source).Str("key", key).Msg("exchange bind")
+    }
+}
+
+func optionalUnbind(ch *amqp091.Channel, dest, source, key string, logger zerolog.Logger) {
+    if source == "" || dest == "" {
+        return
+    }
+    if err := ch.ExchangeUnbind(dest, key, source, false, nil); err != nil {
+        logger.Error().Err(err).Msg("exchange unbind")
+    } else {
+        logger.Info().Str("dest", dest).Str("source", source).Str("key", key).Msg("exchange unbound")
+    }
+}
+
+func publishAndWait(ctx context.Context, ch *amqp091.Channel, exchange, key string, body []byte, logger zerolog.Logger) {
+    dConfirm, err := ch.PublishWithDeferredConfirmWithContext(ctx, exchange, key, false, false, amqp091.Publishing{ContentType: "text/plain", Body: body})
+    if err != nil {
+        logger.Fatal().Err(err).Msg("publish")
+    }
+    if dConfirm == nil {
+        logger.Info().Msg("published (no confirm mode)")
+        return
+    }
+    if ok := dConfirm.Wait(); ok {
+        logger.Info().Msg("published and confirmed")
+    } else {
+        logger.Fatal().Msg("publish was not acknowledged or timed out")
+    }
+}
+
+func deleteAndPurge(ch *amqp091.Channel, cfg publishConfig, logger zerolog.Logger) {
+    if cfg.DeleteExchange && cfg.Exchange != "" {
+        if err := ch.ExchangeDelete(cfg.Exchange, false, false); err != nil {
+            logger.Error().Err(err).Msg("exchange delete")
+        } else {
+            logger.Info().Msg("exchange deleted")
+        }
+    }
+    if cfg.DeleteQueue && cfg.Queue != "" {
+        if _, err := ch.QueueDelete(cfg.Queue, false, false, false); err != nil {
+            logger.Error().Err(err).Msg("queue delete")
+        } else {
+            logger.Info().Msg("queue deleted")
+        }
+    }
+    if cfg.PurgeQueue && cfg.Queue != "" {
+        if cnt, err := ch.QueuePurge(cfg.Queue, false); err != nil {
+            logger.Error().Err(err).Msg("queue purge")
+        } else {
+            logger.Info().Int("purged_messages", cnt).Msg("queue purged")
+        }
+    }
+}
+
+func main() {
+    cfg := parsePublishConfig()
+    logger := newLogger()
+
+    conn, ch := openConnectionAndChannel(cfg.Addr, logger)
+    defer func() {
+        logger.Info().Msg("closing channel")
+        _ = ch.Close()
+        logger.Info().Msg("channel closed")
+        logger.Info().Msg("closing connection")
+        _ = conn.Close()
+        logger.Info().Msg("connection closed")
+    }()
+
+    logger.Info().Msg("publishing")
+    if err := ch.Confirm(false); err != nil {
+        logger.Fatal().Err(err).Msg("channel could not be put into confirm mode")
+    }
+
+    ensureExchangeAndQueue(ch, cfg.Exchange, cfg.Queue, cfg.Key, logger)
+    optionalBind(ch, cfg.BindExchangeDest, cfg.BindExchangeSource, cfg.BindExchangeKey, logger)
+    optionalUnbind(ch, cfg.UnbindExchangeDest, cfg.UnbindExchangeSource, cfg.UnbindExchangeKey, logger)
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    publishAndWait(ctx, ch, cfg.Exchange, cfg.Key, []byte(cfg.Body), logger)
+
+    deleteAndPurge(ch, cfg, logger)
+}
+
