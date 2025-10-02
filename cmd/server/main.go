@@ -342,6 +342,18 @@ func main() {
 			routed, nack := broker.publish(exchange, rkey, body)
 			return routed, nack, nil
 		},
+		OnBasicQos: func(ctx amqp.ConnContext, channel uint16, prefetchSize uint32, prefetchCount uint16, global bool) error {
+			broker.logger.Info().Uint32("prefetch_size", prefetchSize).Uint16("prefetch_count", prefetchCount).Bool("global", global).Msg("basic.qos")
+			return nil
+		},
+		OnChannelFlow: func(ctx amqp.ConnContext, channel uint16, active bool) (bool, error) {
+			broker.logger.Info().Uint16("chan", channel).Bool("active", active).Msg("channel.flow")
+			return active, nil
+		},
+		OnBasicReturn: func(ctx amqp.ConnContext, channel uint16, replyCode uint16, replyText string, exchange, routingKey string, properties amqp.BasicProperties, body []byte) error {
+			broker.logger.Info().Uint16("chan", channel).Uint16("reply_code", replyCode).Str("reply_text", replyText).Str("exchange", exchange).Str("rkey", routingKey).Msg("basic.return")
+			return nil
+		},
 		OnBasicNack: func(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error {
 			broker.logClientNack(channel, deliveryTag, multiple, requeue)
 			return nil

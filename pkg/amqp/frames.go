@@ -48,6 +48,8 @@ const (
 
 	methodChannelOpen    = 10
 	methodChannelOpenOk  = 11
+	methodChannelFlow    = 20
+	methodChannelFlowOk  = 21
 	methodChannelClose   = 40
 	methodChannelCloseOk = 41
 
@@ -79,6 +81,7 @@ const (
 
 	// basic methods (class 60)
 	methodBasicQos       = 10
+	methodBasicQosOk     = 11
 	methodBasicConsume   = 20
 	methodBasicConsumeOk = 21
 	methodBasicCancel    = 30

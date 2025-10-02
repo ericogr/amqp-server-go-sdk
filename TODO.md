@@ -19,7 +19,7 @@ shown next to the status word to make scanning the table easier.
 | Connection | `Update-Secret` | ❌ Not implemented | Optional feature not supported.
 | Channel | `Open` / `Open-Ok` | ✅ Implemented | Channel open/ok supported.
 | Channel | `Close` / `Close-Ok` | ✅ Implemented | Channel close/ok supported.
-| Channel | `Flow` / `Flow-Ok` | ❌ Not implemented | Flow control not implemented.
+| Channel | `Flow` / `Flow-Ok` | ✅ Implemented | Channel.flow parsed and delegated to `ServerHandlers.OnChannelFlow`; server responds with flow-ok.
 | Exchange | `Declare` / `Declare-Ok` | ✅ Implemented | Delegated to `ServerHandlers.OnExchangeDeclare` (args passed to handler).
 | Exchange | `Delete` / `Delete-Ok` | ✅ Implemented | Delegated to `ServerHandlers.OnExchangeDelete`; flags (`if-unused`,`nowait`) parsed; `nowait` suppresses reply.
 | Exchange | `Bind` / `Bind-Ok` | ✅ Implemented | Delegated to `ServerHandlers.OnExchangeBind`; flags (`nowait`) parsed; `nowait` suppresses reply.
@@ -34,13 +34,13 @@ shown next to the status word to make scanning the table easier.
 | Basic | `Get` / `Get-Ok` / `Get-Empty` | ✅ Implemented | Delegated to `ServerHandlers.OnBasicGet`.
 | Basic | `Ack` (consumer→server ack) | ✅ Implemented | Delegated to `ServerHandlers.OnBasicAck(ctx, channel, deliveryTag, multiple)`; parses delivery-tag (longlong) and `multiple` flag.
 | Basic | `Nack` / `Reject` | ✅ Implemented | Client notifications delegated via `OnBasicNack`/`OnBasicReject`; server can send `basic.nack` for publishes based on handler.
-| Basic | `Return` (mandatory/immediate) | ❌ Not implemented | Returning unroutable messages to publisher not implemented.
-| Basic | `Qos` / `Qos-Ok` | ❌ Not implemented | Prefetch/QoS not implemented.
+| Basic | `Return` (mandatory/immediate) | ✅ Implemented | Server sends `basic.return` when `mandatory`/`immediate` are set and handler indicates not routed; SDK notifies `ServerHandlers.OnBasicReturn`.
+| Basic | `Qos` / `Qos-Ok` | ✅ Implemented | `basic.qos` parsed and delegated to `ServerHandlers.OnBasicQos`; SDK replies with `qos-ok`.
 | Confirm | `Select` / `Select-Ok` | ⚠️ Partial | Basic confirm mode implemented (per-channel sequence, per-publish ack/nack); full confirm model not implemented.
 | Tx | `Select` / `Commit` / `Rollback` | ❌ Not implemented | Transactions not supported.
-| Content properties | Content header properties & field-table | ⚠️ Partial | Only `body-size` parsed/serialized; property flags and field-table mostly stubbed.
+| Content properties | Content header properties & field-table | ✅ Implemented | Content header properties parsed into `BasicProperties` including `headers` field-table (supporting common AMQP field-value types).
 | Error handling | Reply-codes & spec errors | ⚠️ Partial | Some reply-codes used; error handling per-spec not exhaustive.
-| Misc | Heartbeats | ⚠️ Partial | Heartbeat frame type recognized; minimal handling.
+| Misc | Heartbeats | ✅ Implemented | Heartbeat negotiation and sending implemented; SDK sends heartbeats when negotiated and resets read deadlines on receive.
 | Transport | TLS support | ✅ Implemented | `ServeWithListener` accepts TLS listeners; `ConnContext.TLSState` filled after handshake; `make gen-certs` available for local testing.
 
 Use this table to track compatibility progress; update the "Status" column to

@@ -76,6 +76,15 @@ type ServerHandlers struct {
 	OnBasicNack   func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error
 	OnBasicReject func(ctx ConnContext, channel uint16, deliveryTag uint64, requeue bool) error
 	OnBasicAck    func(ctx ConnContext, channel uint16, deliveryTag uint64, multiple bool) error
+
+	// Quality of Service (basic.qos)
+	OnBasicQos func(ctx ConnContext, channel uint16, prefetchSize uint32, prefetchCount uint16, global bool) error
+
+	// Channel flow control (channel.flow)
+	OnChannelFlow func(ctx ConnContext, channel uint16, active bool) (bool, error)
+
+	// Notification when server issues a basic.return to a publisher
+	OnBasicReturn func(ctx ConnContext, channel uint16, replyCode uint16, replyText string, exchange, routingKey string, properties BasicProperties, body []byte) error
 }
 
 func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byte) error) error {
@@ -328,7 +337,16 @@ func handleBasicPublish(conn net.Conn, f Frame, args []byte, vhost string, connT
 					}
 				}
 			case "headers":
-				// skip headers parsing in this minimal implementation
+				// parse field-table for headers
+				if pos < len(hf.Payload) {
+					if headers, consumed, err := parseFieldTable(hf.Payload[pos:]); err == nil {
+						props.Headers = headers
+						pos += consumed
+					} else {
+						// on error, leave headers nil and continue
+						logger.Debug().Err(err).Msg("failed to parse headers field-table")
+					}
+				}
 			case "delivery-mode":
 				if pos < len(hf.Payload) {
 					props.DeliveryMode = hf.Payload[pos]
@@ -497,6 +515,10 @@ func handleBasicPublish(conn net.Conn, f Frame, args []byte, vhost string, connT
 		_ = WriteMethod(conn, f.Channel, classBasic, methodBasicReturn, rbuf.Bytes())
 		_ = WriteFrame(conn, Frame{Type: frameHeader, Channel: f.Channel, Payload: buildContentHeaderPayload(classBasic, uint64(len(body.Bytes())))})
 		_ = WriteFrame(conn, Frame{Type: frameBody, Channel: f.Channel, Payload: body.Bytes()})
+		// notify optional handler
+		if handlers != nil && handlers.OnBasicReturn != nil {
+			_ = handlers.OnBasicReturn(ctx, f.Channel, 312, "NO_ROUTE", exch, rkey, props, body.Bytes())
+		}
 	}
 
 	// publisher confirms handling
@@ -611,13 +633,15 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		}
 	}
 
-	// send Tune
-	if err := WriteMethod(conn, 0, classConnection, methodConnTune, buildTuneArgs(0, 131072, 0)); err != nil {
+	// send Tune (advertise server heartbeat)
+	serverHeartbeat := uint16(10) // seconds
+	if err := WriteMethod(conn, 0, classConnection, methodConnTune, buildTuneArgs(0, 131072, serverHeartbeat)); err != nil {
 		logger.Error().Err(err).Msg("[server] write tune error")
 		return
 	}
 
-	// wait for Tune-Ok
+	// wait for Tune-Ok and negotiate heartbeat
+	negotiatedHeartbeat := uint16(0)
 	for {
 		f, err := ReadFrame(conn)
 		if err != nil {
@@ -632,6 +656,17 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 		}
 		logger.Debug().Uint16("chan", f.Channel).Int("class", int(classID)).Int("method", int(methodID)).Int("args", len(args)).Msg("recv method")
 		if classID == classConnection && methodID == methodConnTuneOk {
+			// parse args: channelMax (short), frameMax (long), heartbeat (short)
+			if len(args) >= 8 {
+				clientHeartbeat := binary.BigEndian.Uint16(args[6:8])
+				if serverHeartbeat == 0 || clientHeartbeat == 0 {
+					negotiatedHeartbeat = serverHeartbeat
+				} else if serverHeartbeat < clientHeartbeat {
+					negotiatedHeartbeat = serverHeartbeat
+				} else {
+					negotiatedHeartbeat = clientHeartbeat
+				}
+			}
 			break
 		}
 	}
@@ -685,6 +720,20 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 			ctx = newConnContext(conn, vhost, connTLSState)
 			// clear deadline after handshake
 			conn.SetDeadline(time.Time{})
+			// start heartbeat sender if negotiated
+			if negotiatedHeartbeat > 0 {
+				hb := negotiatedHeartbeat
+				go func() {
+					t := time.NewTicker(time.Duration(hb) * time.Second)
+					defer t.Stop()
+					for range t.C {
+						if err := WriteFrame(conn, Frame{Type: frameHeartbeat, Channel: 0, Payload: nil}); err != nil {
+							logger.Error().Err(err).Msg("[server] heartbeat write error")
+							return
+						}
+					}
+				}()
+			}
 			break
 		}
 	}
@@ -709,6 +758,33 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 			// quick-path: handle Basic.Publish in a dedicated helper
 			if classID == classBasic && methodID == methodBasicPublish {
 				if err := handleBasicPublish(conn, f, args, vhost, connTLSState, handlers, handler, channelStates); err != nil {
+					return
+				}
+				continue
+			}
+
+			// basic.qos (prefetch)
+			if classID == classBasic && methodID == methodBasicQos {
+				// args: prefetch-size (long), prefetch-count (short), global (bit)
+				var prefetchSize uint32
+				var prefetchCount uint16
+				var global bool
+				if len(args) >= 7 {
+					prefetchSize = binary.BigEndian.Uint32(args[0:4])
+					prefetchCount = binary.BigEndian.Uint16(args[4:6])
+					if args[6]&1 == 1 {
+						global = true
+					}
+				}
+				if handlers != nil && handlers.OnBasicQos != nil {
+					if err := handlers.OnBasicQos(ctx, f.Channel, prefetchSize, prefetchCount, global); err != nil {
+						_ = writeConnectionClose(conn, 504, "basic.qos failed", classBasic, methodBasicQos)
+						return
+					}
+				}
+				// respond with qos-ok
+				if err := WriteMethod(conn, f.Channel, classBasic, methodBasicQosOk, []byte{}); err != nil {
+					logger.Error().Err(err).Msg("[server] write qos-ok error")
 					return
 				}
 				continue
@@ -1301,6 +1377,33 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 					}
 					if err := WriteFrame(conn, Frame{Type: frameBody, Channel: f.Channel, Payload: msg}); err != nil {
 						logger.Error().Err(err).Msg("[server] write body error")
+						return
+					}
+					continue
+				}
+
+				// channel.flow (flow control)
+				if classID == classChannel && methodID == methodChannelFlow {
+					// args: active flag (octet)
+					active := false
+					if len(args) > 0 && args[0]&1 == 1 {
+						active = true
+					}
+					respActive := active
+					if handlers != nil && handlers.OnChannelFlow != nil {
+						if ra, err := handlers.OnChannelFlow(ctx, f.Channel, active); err != nil {
+							_ = writeConnectionClose(conn, 504, "channel.flow failed", classChannel, methodChannelFlow)
+							return
+						} else {
+							respActive = ra
+						}
+					}
+					b := byte(0)
+					if respActive {
+						b = 1
+					}
+					if err := WriteMethod(conn, f.Channel, classChannel, methodChannelFlowOk, []byte{b}); err != nil {
+						logger.Error().Err(err).Msg("[server] write channel.flow-ok error")
 						return
 					}
 					continue

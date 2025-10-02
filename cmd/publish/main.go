@@ -27,6 +27,8 @@ type publishConfig struct {
 	UnbindExchangeSource string
 	UnbindExchangeDest   string
 	UnbindExchangeKey    string
+	PrefetchCount        int
+	Mandatory            bool
 }
 
 func parsePublishConfig() publishConfig {
@@ -45,6 +47,8 @@ func parsePublishConfig() publishConfig {
 	flag.StringVar(&c.UnbindExchangeSource, "unbind-exchange-source", "", "source exchange to unbind from")
 	flag.StringVar(&c.UnbindExchangeDest, "unbind-exchange-dest", "", "destination exchange to unbind")
 	flag.StringVar(&c.UnbindExchangeKey, "unbind-exchange-key", "", "routing key for exchange unbind")
+	flag.IntVar(&c.PrefetchCount, "prefetch-count", 0, "basic.qos prefetch-count (0 = no limit)")
+	flag.BoolVar(&c.Mandatory, "mandatory", false, "publish with mandatory=true to request basic.return for unroutable messages")
 	flag.Parse()
 	return c
 }
@@ -105,8 +109,8 @@ func optionalUnbind(ch *amqp091.Channel, dest, source, key string, logger zerolo
 	}
 }
 
-func publishAndWait(ctx context.Context, ch *amqp091.Channel, exchange, key string, body []byte, logger zerolog.Logger) {
-	dConfirm, err := ch.PublishWithDeferredConfirmWithContext(ctx, exchange, key, false, false, amqp091.Publishing{ContentType: "text/plain", Body: body})
+func publishAndWait(ctx context.Context, ch *amqp091.Channel, exchange, key string, body []byte, mandatory bool, logger zerolog.Logger) {
+	dConfirm, err := ch.PublishWithDeferredConfirmWithContext(ctx, exchange, key, mandatory, false, amqp091.Publishing{ContentType: "text/plain", Body: body})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("publish")
 	}
@@ -164,13 +168,31 @@ func main() {
 		logger.Fatal().Err(err).Msg("channel could not be put into confirm mode")
 	}
 
+	// apply QoS if requested
+	if cfg.PrefetchCount > 0 {
+		if err := ch.Qos(cfg.PrefetchCount, 0, false); err != nil {
+			logger.Error().Err(err).Msg("failed to set qos")
+		} else {
+			logger.Info().Int("prefetch_count", cfg.PrefetchCount).Msg("qos set")
+		}
+	}
+
+	// listen for basic.return (unroutable messages) when publishing mandatory
+	returns := make(chan amqp091.Return)
+	ch.NotifyReturn(returns)
+	go func() {
+		for r := range returns {
+			logger.Info().Str("exchange", r.Exchange).Str("routing_key", r.RoutingKey).Str("body", string(r.Body)).Msg("message returned")
+		}
+	}()
+
 	ensureExchangeAndQueue(ch, cfg.Exchange, cfg.Queue, cfg.Key, logger)
 	optionalBind(ch, cfg.BindExchangeDest, cfg.BindExchangeSource, cfg.BindExchangeKey, logger)
 	optionalUnbind(ch, cfg.UnbindExchangeDest, cfg.UnbindExchangeSource, cfg.UnbindExchangeKey, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	publishAndWait(ctx, ch, cfg.Exchange, cfg.Key, []byte(cfg.Body), logger)
+	publishAndWait(ctx, ch, cfg.Exchange, cfg.Key, []byte(cfg.Body), cfg.Mandatory, logger)
 
 	deleteAndPurge(ch, cfg, logger)
 }
