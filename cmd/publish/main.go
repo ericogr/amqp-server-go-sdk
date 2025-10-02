@@ -156,10 +156,14 @@ func main() {
 	conn, ch := openConnectionAndChannel(cfg.Addr, logger)
 	defer func() {
 		logger.Info().Msg("closing channel")
-		_ = ch.Close()
+		if err := ch.Close(); err != nil {
+			logger.Error().Err(err).Msg("channel close error")
+		}
 		logger.Info().Msg("channel closed")
 		logger.Info().Msg("closing connection")
-		_ = conn.Close()
+		if err := conn.Close(); err != nil {
+			logger.Error().Err(err).Msg("connection close error")
+		}
 		logger.Info().Msg("connection closed")
 	}()
 

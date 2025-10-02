@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -111,7 +112,9 @@ func (a *UpstreamAdapter) OnConnClose(ctx amqp.ConnContext) {
 	}
 	s.mu.Lock()
 	if s.upstreamConn != nil {
-		_ = s.upstreamConn.Close()
+		if err := s.upstreamConn.Close(); err != nil {
+			a.logger.Error().Err(err).Msg("failed to close upstream connection")
+		}
 		s.upstreamConn = nil
 	}
 	// mark session as closed so background reconnect loops do not restart it
@@ -119,7 +122,9 @@ func (a *UpstreamAdapter) OnConnClose(ctx amqp.ConnContext) {
 	s.clientConn = nil
 	for _, ch := range s.channels {
 		if ch.upstreamCh != nil {
-			_ = ch.upstreamCh.Close()
+			if err := ch.upstreamCh.Close(); err != nil {
+				a.logger.Error().Err(err).Msg("failed to close upstream channel")
+			}
 			ch.upstreamCh = nil
 		}
 	}
@@ -192,11 +197,15 @@ func (a *UpstreamAdapter) OnBasicPublish(ctx amqp.ConnContext, channel uint16, e
 		case FailEnqueue:
 			// enqueue and report accepted
 			pub := amqp091.Publishing{ContentType: properties.ContentType, Body: body, Headers: amqp091.Table(properties.Headers)}
-			_ = s.enqueuePublish(channel, exchange, rkey, pub)
+			if err := s.enqueuePublish(channel, exchange, rkey, pub); err != nil {
+				return false, false, err
+			}
 			return true, false, nil
 		case FailReconnect:
 			// try to reconnect synchronously once
-			_ = s.connectUpstream(s.cfg, s.upUser, s.upPass)
+			if err := s.connectUpstream(s.cfg, s.upUser, s.upPass); err != nil {
+				return false, false, err
+			}
 			ch, err = s.getOrCreateChannel(channel)
 			if err != nil {
 				return false, false, err
@@ -230,7 +239,9 @@ func (a *UpstreamAdapter) OnBasicPublish(ctx amqp.ConnContext, channel uint16, e
 		// upstream channel lost - handle according to policy
 		switch s.cfg.FailurePolicy {
 		case FailEnqueue:
-			_ = s.enqueuePublish(channel, exchange, rkey, pub)
+			if err := s.enqueuePublish(channel, exchange, rkey, pub); err != nil {
+				return false, false, err
+			}
 			return true, false, nil
 		case FailReconnect:
 			if err := s.connectUpstream(s.cfg, s.upUser, s.upPass); err != nil {
@@ -246,18 +257,20 @@ func (a *UpstreamAdapter) OnBasicPublish(ctx amqp.ConnContext, channel uint16, e
 		}
 	}
 
-	if err := ch.upstreamCh.Publish(exchange, rkey, mandatory, immediate, pub); err != nil {
+	if err := ch.upstreamCh.PublishWithContext(context.Background(), exchange, rkey, mandatory, immediate, pub); err != nil {
 		// on publish error apply failure policy
 		switch s.cfg.FailurePolicy {
 		case FailEnqueue:
-			_ = s.enqueuePublish(channel, exchange, rkey, pub)
+			if err := s.enqueuePublish(channel, exchange, rkey, pub); err != nil {
+				return false, false, err
+			}
 			return true, false, nil
 		case FailReconnect:
 			if cerr := s.connectUpstream(s.cfg, s.upUser, s.upPass); cerr == nil {
 				ch, err = s.getOrCreateChannel(channel)
 				if err == nil {
 					// retry once
-					if perr := ch.upstreamCh.Publish(exchange, rkey, mandatory, immediate, pub); perr == nil {
+					if perr := ch.upstreamCh.PublishWithContext(context.Background(), exchange, rkey, mandatory, immediate, pub); perr == nil {
 						// proceed to confirm handling below
 					} else {
 						return false, false, perr

@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -43,6 +44,8 @@ type upstreamChannel struct {
 	confirming       bool
 	// active consumer subscriptions keyed by upstream consumer-tag
 	consumers map[string]*consumerSubscription
+	// logger copied from session for convenience
+	logger zerolog.Logger
 }
 
 type enqueuedMsg struct {
@@ -113,9 +116,46 @@ func (c *upstreamChannel) startConsumer(sub *consumerSubscription) error {
 			dar.WriteByte(0)
 			dar.Write(amqp.EncodeShortStr(d.Exchange))
 			dar.Write(amqp.EncodeShortStr(d.RoutingKey))
-			_ = sub.ctx.WriteMethod(sub.channel, amqp.ClassBasic, amqp.MethodBasicDeliver, dar.Bytes())
-			_ = sub.ctx.WriteFrame(amqp.Frame{Type: amqp.FrameHeader, Channel: sub.channel, Payload: amqp.BuildContentHeaderPayload(amqp.ClassBasic, uint64(len(d.Body)))})
-			_ = sub.ctx.WriteFrame(amqp.Frame{Type: amqp.FrameBody, Channel: sub.channel, Payload: d.Body})
+
+			if err := sub.ctx.WriteMethod(sub.channel, amqp.ClassBasic, amqp.MethodBasicDeliver, dar.Bytes()); err != nil {
+				// client likely gone — remove consumer and cancel upstream
+				c.mu.Lock()
+				delete(c.consumers, sub.upTag)
+				c.mu.Unlock()
+				if c.upstreamCh != nil {
+					if cerr := c.upstreamCh.Cancel(sub.upTag, false); cerr != nil {
+						c.logger.Error().Err(cerr).Str("up_tag", sub.upTag).Msg("failed to cancel upstream consumer")
+					}
+				}
+				c.logger.Error().Err(err).Str("up_tag", sub.upTag).Msg("failed to write deliver method to client; stopping consumer")
+				return
+			}
+
+			if err := sub.ctx.WriteFrame(amqp.Frame{Type: amqp.FrameHeader, Channel: sub.channel, Payload: amqp.BuildContentHeaderPayload(amqp.ClassBasic, uint64(len(d.Body)))}); err != nil {
+				c.mu.Lock()
+				delete(c.consumers, sub.upTag)
+				c.mu.Unlock()
+				if c.upstreamCh != nil {
+					if cerr := c.upstreamCh.Cancel(sub.upTag, false); cerr != nil {
+						c.logger.Error().Err(cerr).Str("up_tag", sub.upTag).Msg("failed to cancel upstream consumer")
+					}
+				}
+				c.logger.Error().Err(err).Str("up_tag", sub.upTag).Msg("failed to write content header to client; stopping consumer")
+				return
+			}
+
+			if err := sub.ctx.WriteFrame(amqp.Frame{Type: amqp.FrameBody, Channel: sub.channel, Payload: d.Body}); err != nil {
+				c.mu.Lock()
+				delete(c.consumers, sub.upTag)
+				c.mu.Unlock()
+				if c.upstreamCh != nil {
+					if cerr := c.upstreamCh.Cancel(sub.upTag, false); cerr != nil {
+						c.logger.Error().Err(cerr).Str("up_tag", sub.upTag).Msg("failed to cancel upstream consumer")
+					}
+				}
+				c.logger.Error().Err(err).Str("up_tag", sub.upTag).Msg("failed to write body frame to client; stopping consumer")
+				return
+			}
 		}
 	}()
 	return nil
@@ -131,7 +171,9 @@ func (c *upstreamChannel) restoreConsumers() {
 	}
 	c.mu.Unlock()
 	for _, s := range subs {
-		_ = c.startConsumer(s)
+		if err := c.startConsumer(s); err != nil {
+			c.logger.Error().Err(err).Str("up_tag", s.upTag).Msg("failed to start consumer during restore")
+		}
 	}
 }
 
@@ -231,7 +273,9 @@ func (s *upstreamSession) monitorUpstream() {
 	switch cfg.FailurePolicy {
 	case FailCloseClient:
 		// close client connection
-		_ = client.Close()
+		if err := client.Close(); err != nil {
+			s.logger.Error().Err(err).Msg("failed to close client after upstream connection closed")
+		}
 		return
 	case FailReconnect:
 		// attempt reconnect loop
@@ -343,8 +387,14 @@ func (s *upstreamSession) drainEnqueued() {
 			s.enqueueMu.Unlock()
 			continue
 		}
-		// publish and ignore errors (could re-enqueue)
-		_ = chm.upstreamCh.Publish(em.exchange, em.rkey, false, false, em.pub)
+		// publish and handle errors: on failure re-enqueue and log
+		if err := chm.upstreamCh.PublishWithContext(context.Background(), em.exchange, em.rkey, false, false, em.pub); err != nil {
+			// re-enqueue for future retry
+			s.enqueueMu.Lock()
+			s.enqueued = append(s.enqueued, em)
+			s.enqueueMu.Unlock()
+			s.logger.Error().Err(err).Uint16("client_channel", em.channel).Str("exchange", em.exchange).Str("rkey", em.rkey).Msg("failed to publish enqueued message, re-enqueued")
+		}
 	}
 }
 
@@ -361,7 +411,7 @@ func (s *upstreamSession) getOrCreateChannel(clientChan uint16) (*upstreamChanne
 	if err != nil {
 		return nil, err
 	}
-	c := &upstreamChannel{upstreamCh: upch, clientToUpstream: map[uint64]uint64{}, upstreamToClient: map[uint64]uint64{}, nextClientTag: 1}
+	c := &upstreamChannel{upstreamCh: upch, clientToUpstream: map[uint64]uint64{}, upstreamToClient: map[uint64]uint64{}, nextClientTag: 1, logger: s.logger}
 	s.channels[clientChan] = c
 	return c, nil
 }

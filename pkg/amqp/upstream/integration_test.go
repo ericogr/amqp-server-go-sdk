@@ -4,6 +4,7 @@
 package upstream
 
 import (
+	"context"
 	"net"
 	"os"
 	"testing"
@@ -49,7 +50,7 @@ func TestIntegration_UpstreamBasic(t *testing.T) {
 	}
 
 	body := []byte("hello-it")
-	if err := ch.upstreamCh.Publish("", q, false, false, amqp091.Publishing{Body: body}); err != nil {
+	if err := ch.upstreamCh.PublishWithContext(context.Background(), "", q, false, false, amqp091.Publishing{Body: body}); err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
 
