@@ -27,7 +27,7 @@ itest:
 	@sleep 8
 	RABBIT_URL=amqp://guest:guest@127.0.0.1:5672/ go test -tags=integration ./pkg/amqp/upstream -v || true
 	@echo "Stopping RabbitMQ container..."
-	@docker stop amqp-it-test >/dev/null || true
+	@docker rm -f amqp-it-test >/dev/null || true
 
 .PHONY: rabbit-start rabbit-stop
 
