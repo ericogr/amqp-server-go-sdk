@@ -1,4 +1,5 @@
-DEFAULT_PORT ?= 5672
+DEFAULT_PORT ?= 5673
+DEFAULT_URL ?= amqp://admin:admin@127.0.0.1:$(DEFAULT_PORT)/
 DEFAULT_UPSTREAM_PORT ?= 5673
 UPSTREAM_URL ?= amqp://admin:admin@127.0.0.1:5672/
 
@@ -42,10 +43,10 @@ rabbit-stop:
 	@docker rm amqp-rabbit >/dev/null || true
 
 publish:
-	go run ./cmd/publish --addr amqp://admin:admin@127.0.0.1:$(DEFAULT_PORT)/ --exchange "" --key test --body "hello" --exchange testx --queue testq --delete-exchange true
+	go run ./cmd/publish --addr $(DEFAULT_URL) --exchange "" --key test --body "hello" --exchange testx --queue testq --delete-exchange true
 
 consume:
-	go run ./cmd/consume --addr amqps://admin:admin@127.0.0.1:5671/ --queue test-queue
+	go run ./cmd/consume --addr $(DEFAULT_URL) --queue test-queue
 
 .PHONY: gen-certs
 
