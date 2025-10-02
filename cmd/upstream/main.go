@@ -47,6 +47,7 @@ func main() {
 	}
 
 	adapter := upstream.NewUpstreamAdapter(cfg)
+	adapter.SetLogger(logger)
 
 	logger.Info().Str("addr", *addr).Str("upstream", *upstreamURL).Msg("starting AMQP upstream proxy (delegates by default)")
 

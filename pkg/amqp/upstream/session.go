@@ -1,41 +1,48 @@
 package upstream
 
 import (
-	"crypto/tls"
-	"fmt"
-	"net"
-	"net/url"
-	"sync"
-	"time"
+    "bytes"
+    "crypto/tls"
+    "fmt"
+    "net"
+    "net/url"
+    "sync"
+    "time"
 
-	amqp091 "github.com/rabbitmq/amqp091-go"
+    amqp "github.com/ericogr/amqp-test/pkg/amqp"
+    amqp091 "github.com/rabbitmq/amqp091-go"
+    "github.com/rs/zerolog"
 )
 
 type upstreamSession struct {
-	clientConn   net.Conn
-	upstreamConn *amqp091.Connection
-	mu           sync.Mutex
-	channels     map[uint16]*upstreamChannel
+    clientConn   net.Conn
+    upstreamConn *amqp091.Connection
+    mu           sync.Mutex
+    channels     map[uint16]*upstreamChannel
 	// optional in-memory enqueue for failure policy (not fully implemented)
 	enqueueMu sync.Mutex
 	enqueued  []enqueuedMsg
 	// last used upstream credentials (for reconnect)
-	upUser string
-	upPass string
-	cfg    UpstreamConfig
-	// closed indicates the client connection has been closed and the
-	// session should not attempt reconnects.
-	closed bool
+    upUser string
+    upPass string
+    cfg    UpstreamConfig
+    // closed indicates the client connection has been closed and the
+    // session should not attempt reconnects.
+    closed bool
+    // logger copied from adapter for session-level logs
+    logger zerolog.Logger
 }
 
 type upstreamChannel struct {
-	upstreamCh *amqp091.Channel
-	mu         sync.Mutex
-	// delivery tag mappings client->upstream and upstream->client
-	clientToUpstream map[uint64]uint64
-	upstreamToClient map[uint64]uint64
-	nextClientTag    uint64
-	confirming       bool
+    upstreamCh *amqp091.Channel
+    mu         sync.Mutex
+    // delivery tag mappings client->upstream and upstream->client
+    clientToUpstream map[uint64]uint64
+    upstreamToClient map[uint64]uint64
+    nextClientTag    uint64
+    confirming       bool
+    // active consumer subscriptions keyed by upstream consumer-tag
+    consumers map[string]*consumerSubscription
 }
 
 type enqueuedMsg struct {
@@ -47,14 +54,85 @@ type enqueuedMsg struct {
 }
 
 func (a *UpstreamAdapter) getOrCreateSession(conn net.Conn) *upstreamSession {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if s, ok := a.sessions[conn]; ok {
-		return s
-	}
-	s := &upstreamSession{clientConn: conn, channels: map[uint16]*upstreamChannel{}}
-	a.sessions[conn] = s
-	return s
+    a.mu.Lock()
+    defer a.mu.Unlock()
+    if s, ok := a.sessions[conn]; ok {
+        return s
+    }
+    s := &upstreamSession{clientConn: conn, channels: map[uint16]*upstreamChannel{}, logger: a.logger}
+    a.sessions[conn] = s
+    return s
+}
+
+// consumerSubscription stores information needed to recreate a consumer on reconnect
+type consumerSubscription struct {
+    queue   string
+    upTag   string
+    channel uint16
+    ctx     amqp.ConnContext
+}
+
+// addConsumer registers a subscription and starts it if an upstream channel
+// is available.
+func (c *upstreamChannel) addConsumer(sub *consumerSubscription) error {
+    c.mu.Lock()
+    if c.consumers == nil {
+        c.consumers = map[string]*consumerSubscription{}
+    }
+    c.consumers[sub.upTag] = sub
+    upch := c.upstreamCh
+    c.mu.Unlock()
+    if upch != nil {
+        return c.startConsumer(sub)
+    }
+    return nil
+}
+
+// startConsumer starts delivering messages from upstream for a subscription.
+func (c *upstreamChannel) startConsumer(sub *consumerSubscription) error {
+    if c.upstreamCh == nil {
+        return fmt.Errorf("no upstream channel")
+    }
+    deliveries, err := c.upstreamCh.Consume(sub.queue, sub.upTag, false, false, false, false, nil)
+    if err != nil {
+        return err
+    }
+
+    go func() {
+        for d := range deliveries {
+            c.mu.Lock()
+            clientTag := c.nextClientTag
+            c.nextClientTag++
+            c.clientToUpstream[clientTag] = d.DeliveryTag
+            c.upstreamToClient[d.DeliveryTag] = clientTag
+            c.mu.Unlock()
+
+            var dar bytes.Buffer
+            dar.Write(amqp.EncodeShortStr(sub.upTag))
+            dar.Write(amqp.EncodeLongLong(clientTag))
+            dar.WriteByte(0)
+            dar.Write(amqp.EncodeShortStr(d.Exchange))
+            dar.Write(amqp.EncodeShortStr(d.RoutingKey))
+            _ = sub.ctx.WriteMethod(sub.channel, amqp.ClassBasic, amqp.MethodBasicDeliver, dar.Bytes())
+            _ = sub.ctx.WriteFrame(amqp.Frame{Type: amqp.FrameHeader, Channel: sub.channel, Payload: amqp.BuildContentHeaderPayload(amqp.ClassBasic, uint64(len(d.Body)))})
+            _ = sub.ctx.WriteFrame(amqp.Frame{Type: amqp.FrameBody, Channel: sub.channel, Payload: d.Body})
+        }
+    }()
+    return nil
+}
+
+// restoreConsumers starts all registered consumers when an upstream channel
+// has been (re)created.
+func (c *upstreamChannel) restoreConsumers() {
+    c.mu.Lock()
+    subs := make([]*consumerSubscription, 0, len(c.consumers))
+    for _, s := range c.consumers {
+        subs = append(subs, s)
+    }
+    c.mu.Unlock()
+    for _, s := range subs {
+        _ = c.startConsumer(s)
+    }
 }
 
 // buildDialURL injects credentials into a configured upstream URL.
@@ -113,6 +191,8 @@ func (s *upstreamSession) connectUpstream(cfg UpstreamConfig, user, pass string)
 			continue
 		}
 		s.channels[clientChan].upstreamCh = upch
+		// restore any consumers that were previously registered on this channel
+		s.channels[clientChan].restoreConsumers()
 	}
 	// drain any enqueued messages
 	go s.drainEnqueued()
@@ -124,10 +204,11 @@ func (s *upstreamSession) monitorUpstream() {
 	if s.upstreamConn == nil {
 		return
 	}
-	closeCh := make(chan *amqp091.Error)
-	s.upstreamConn.NotifyClose(closeCh)
-	<-closeCh
-	// upstream closed
+    closeCh := make(chan *amqp091.Error)
+    s.upstreamConn.NotifyClose(closeCh)
+    errInfo := <-closeCh
+    // upstream closed
+    s.logger.Info().Err(errInfo).Msg("upstream connection closed")
 	s.mu.Lock()
 	s.upstreamConn = nil
 	// mark channels upstreamCh nil
@@ -170,23 +251,28 @@ func (s *upstreamSession) monitorUpstream() {
 			} else {
 				conn, err = amqp091.Dial(dialURL)
 			}
-			if err == nil {
-				s.mu.Lock()
-				s.upstreamConn = conn
-				// recreate channels
-				for clientChan := range s.channels {
-					upch, err := s.upstreamConn.Channel()
-					if err == nil {
-						s.channels[clientChan].upstreamCh = upch
-					}
+			if err != nil {
+				s.logger.Warn().Err(err).Msg("failed to reconnect to upstream, will retry")
+				time.Sleep(cfg.ReconnectDelay)
+				continue
+			}
+			// success
+			s.logger.Info().Msg("reconnected to upstream")
+			s.mu.Lock()
+			s.upstreamConn = conn
+			// recreate channels
+			for clientChan := range s.channels {
+				upch, err := s.upstreamConn.Channel()
+				if err == nil {
+					s.channels[clientChan].upstreamCh = upch
+					s.channels[clientChan].restoreConsumers()
 				}
+			}
 				s.mu.Unlock()
 				go s.drainEnqueued()
 				// restart monitor
 				go s.monitorUpstream()
 				return
-			}
-			time.Sleep(cfg.ReconnectDelay)
 		}
 	case FailEnqueue:
 		// simply leave messages enqueued and run reconnect attempts in background
@@ -207,21 +293,26 @@ func (s *upstreamSession) monitorUpstream() {
 				} else {
 					conn, err = amqp091.Dial(dialURL)
 				}
-				if err == nil {
-					s.mu.Lock()
-					s.upstreamConn = conn
-					for clientChan := range s.channels {
-						upch, err := s.upstreamConn.Channel()
-						if err == nil {
-							s.channels[clientChan].upstreamCh = upch
-						}
-					}
-					s.mu.Unlock()
-					go s.drainEnqueued()
-					go s.monitorUpstream()
-					return
+				if err != nil {
+					s.logger.Warn().Err(err).Msg("failed to reconnect to upstream, will retry")
+					time.Sleep(cfg.ReconnectDelay)
+					continue
 				}
-				time.Sleep(cfg.ReconnectDelay)
+				// success
+				s.logger.Info().Msg("reconnected to upstream")
+				s.mu.Lock()
+				s.upstreamConn = conn
+				for clientChan := range s.channels {
+					upch, err := s.upstreamConn.Channel()
+					if err == nil {
+						s.channels[clientChan].upstreamCh = upch
+						s.channels[clientChan].restoreConsumers()
+					}
+				}
+				s.mu.Unlock()
+				go s.drainEnqueued()
+				go s.monitorUpstream()
+				return
 			}
 		}()
 		return
