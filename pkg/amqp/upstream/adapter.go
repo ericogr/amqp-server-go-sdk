@@ -84,7 +84,41 @@ func (a *UpstreamAdapter) Handlers() *amqp.ServerHandlers {
 		OnBasicQos:        a.OnBasicQos,
 		OnBasicReturn:     a.OnBasicReturn,
 		OnChannelFlow:     a.OnChannelFlow,
+		OnConnClose:       a.OnConnClose,
 	}
+}
+
+// OnConnClose is invoked when the client connection is closing. The adapter
+// should close the upstream connection and remove any session state tied to
+// the client net.Conn to avoid leaking upstream connections.
+func (a *UpstreamAdapter) OnConnClose(ctx amqp.ConnContext) {
+	if ctx.Conn == nil {
+		return
+	}
+	a.mu.Lock()
+	s, ok := a.sessions[ctx.Conn]
+	if ok {
+		delete(a.sessions, ctx.Conn)
+	}
+	a.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+		s.upstreamConn = nil
+	}
+	// mark session as closed so background reconnect loops do not restart it
+	s.closed = true
+	s.clientConn = nil
+	for _, ch := range s.channels {
+		if ch.upstreamCh != nil {
+			_ = ch.upstreamCh.Close()
+			ch.upstreamCh = nil
+		}
+	}
+	s.mu.Unlock()
 }
 
 // AuthHandler implements amqp.AuthHandler. It is intended to be passed to

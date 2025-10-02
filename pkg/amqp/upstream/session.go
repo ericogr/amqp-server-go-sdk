@@ -23,6 +23,9 @@ type upstreamSession struct {
 	upUser string
 	upPass string
 	cfg    UpstreamConfig
+	// closed indicates the client connection has been closed and the
+	// session should not attempt reconnects.
+	closed bool
 }
 
 type upstreamChannel struct {
@@ -135,7 +138,13 @@ func (s *upstreamSession) monitorUpstream() {
 	user := s.upUser
 	pass := s.upPass
 	client := s.clientConn
+	closed := s.closed
 	s.mu.Unlock()
+
+	// if the client connection is closed/marked, do not attempt reconnect
+	if client == nil || closed {
+		return
+	}
 
 	// policy handling
 	switch cfg.FailurePolicy {

@@ -85,6 +85,11 @@ type ServerHandlers struct {
 
 	// Notification when server issues a basic.return to a publisher
 	OnBasicReturn func(ctx ConnContext, channel uint16, replyCode uint16, replyText string, exchange, routingKey string, properties BasicProperties, body []byte) error
+
+	// OnConnClose is invoked when the connection handler is about to return
+	// and the underlying net.Conn is being closed. Implementations can use
+	// this to perform cleanup (for example closing upstream resources).
+	OnConnClose func(ctx ConnContext)
 }
 
 func Serve(addr string, handler func(ctx ConnContext, channel uint16, body []byte) error) error {
@@ -589,6 +594,12 @@ func handleConnWithAuth(conn net.Conn, handler func(ctx ConnContext, channel uin
 
 	// connection-scoped context for handlers (declare early)
 	var ctx ConnContext
+	// ensure connection-close notifications reach handlers that want them
+	defer func() {
+		if handlers != nil && handlers.OnConnClose != nil {
+			handlers.OnConnClose(ctx)
+		}
+	}()
 	// populated after Connection.Open
 	var vhost string
 	// authentication info parsed from Start-Ok (if auth handler provided)
