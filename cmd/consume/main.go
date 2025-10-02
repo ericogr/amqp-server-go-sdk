@@ -19,7 +19,7 @@ type consumeConfig struct {
 
 func parseConsumeConfig() consumeConfig {
 	var c consumeConfig
-	flag.StringVar(&c.Addr, "addr", "amqps://guest:guest@127.0.0.1:5671/", "AMQP URL")
+	flag.StringVar(&c.Addr, "addr", "amqps://admin:admin@127.0.0.1:5671/", "AMQP URL")
 	flag.StringVar(&c.Queue, "queue", "test-queue", "queue name")
 	flag.BoolVar(&c.AutoAck, "auto-ack", false, "auto ack messages")
 	flag.BoolVar(&c.Insecure, "insecure", true, "skip TLS verify for demo")

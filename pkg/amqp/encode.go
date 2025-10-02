@@ -114,6 +114,14 @@ func buildContentHeaderPayload(classID uint16, bodySize uint64) []byte {
 	return buf.Bytes()
 }
 
+// Exported wrappers
+func EncodeShortStr(s string) []byte { return encodeShortStr(s) }
+func EncodeLongLong(v uint64) []byte { return encodeLongLong(v) }
+func EncodeShort(v uint16) []byte    { return encodeShort(v) }
+func BuildContentHeaderPayload(classID uint16, bodySize uint64) []byte {
+	return buildContentHeaderPayload(classID, bodySize)
+}
+
 // Field table parsing/serialization
 // Supports a subset of AMQP field-value types commonly used in headers:
 //  - 't' boolean (1 octet)

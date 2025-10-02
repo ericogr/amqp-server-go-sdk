@@ -171,3 +171,26 @@ func ParseMethod(payload []byte) (classID, methodID uint16, args []byte, err err
 	args = payload[4:]
 	return classID, methodID, args, nil
 }
+
+// Exported aliases for commonly used constants and helpers so external packages
+// (such as pkg/amqp/upstream) can reuse the protocol constants without
+// duplicating values.
+var (
+	FrameMethod    uint8 = frameMethod
+	FrameHeader    uint8 = frameHeader
+	FrameBody      uint8 = frameBody
+	FrameHeartbeat uint8 = frameHeartbeat
+
+	ClassConnection uint16 = classConnection
+	ClassChannel    uint16 = classChannel
+	ClassExchange   uint16 = classExchange
+	ClassQueue      uint16 = classQueue
+	ClassBasic      uint16 = classBasic
+
+	MethodBasicPublish uint16 = methodBasicPublish
+	MethodBasicDeliver uint16 = methodBasicDeliver
+	MethodBasicAck     uint16 = methodBasicAck
+	MethodBasicNack    uint16 = methodBasicNack
+	MethodBasicQos     uint16 = methodBasicQos
+	MethodBasicQosOk   uint16 = methodBasicQosOk
+)

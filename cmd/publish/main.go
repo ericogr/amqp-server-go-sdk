@@ -33,7 +33,7 @@ type publishConfig struct {
 
 func parsePublishConfig() publishConfig {
 	var c publishConfig
-	flag.StringVar(&c.Addr, "addr", "amqps://guest:guest@127.0.0.1:5671/", "AMQP URL")
+	flag.StringVar(&c.Addr, "addr", "amqps://admin:admin@127.0.0.1:5671/", "AMQP URL")
 	flag.StringVar(&c.Exchange, "exchange", "", "exchange name")
 	flag.StringVar(&c.Key, "key", "test", "routing key")
 	flag.StringVar(&c.Queue, "queue", "test-queue", "queue name")

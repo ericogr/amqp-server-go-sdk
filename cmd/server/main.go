@@ -372,7 +372,7 @@ func main() {
 		},
 	}
 
-	// simple auth handler: accept PLAIN guest:guest
+	// simple auth handler: accept PLAIN admin:admin
 	auth := func(ctx amqp.ConnContext, mechanism string, response []byte) error {
 		if mechanism != "PLAIN" {
 			return fmt.Errorf("unsupported mechanism %q", mechanism)
@@ -388,7 +388,7 @@ func main() {
 		} else {
 			return fmt.Errorf("invalid PLAIN response")
 		}
-		if username != "guest" || password != "guest" {
+		if username != "admin" || password != "admin" {
 			return fmt.Errorf("invalid credentials")
 		}
 		logger.Info().Str("user", username).Str("vhost", ctx.Vhost).Bool("tls", ctx.TLSState != nil).Msg("user authentication successful")
