@@ -1,16 +1,16 @@
 package upstream
 
 import (
-    "bytes"
-    "crypto/tls"
-    "fmt"
-    "net"
-    "sync"
-    "time"
+	"bytes"
+	"crypto/tls"
+	"fmt"
+	"net"
+	"sync"
+	"time"
 
-    amqp "github.com/ericogr/amqp-test/pkg/amqp"
-    amqp091 "github.com/rabbitmq/amqp091-go"
-    "github.com/rs/zerolog"
+	amqp "github.com/ericogr/amqp-test/pkg/amqp"
+	amqp091 "github.com/rabbitmq/amqp091-go"
+	"github.com/rs/zerolog"
 )
 
 // FailurePolicy controls behavior when upstream (real broker) fails.
@@ -44,23 +44,23 @@ type PublishHook func(ctx amqp.ConnContext, ch uint16, exchange, rkey string, ma
 // a set of handlers compatible with `amqp.ServerHandlers` that can be passed to
 // `amqp.ServeWithAuth`.
 type UpstreamAdapter struct {
-    cfg         UpstreamConfig
-    AuthHook    AuthHook
-    PublishHook PublishHook
+	cfg         UpstreamConfig
+	AuthHook    AuthHook
+	PublishHook PublishHook
 
-    mu       sync.Mutex
-    sessions map[net.Conn]*upstreamSession
-    logger   zerolog.Logger
+	mu       sync.Mutex
+	sessions map[net.Conn]*upstreamSession
+	logger   zerolog.Logger
 }
 
 // NewUpstreamAdapter creates a new adapter configured to talk to the provided
 // upstream URL. The URL should include host:port and may omit credentials; the
 // adapter will use credentials provided by the client or the configured defaults.
 func NewUpstreamAdapter(cfg UpstreamConfig) *UpstreamAdapter {
-    if cfg.ReconnectDelay == 0 {
-        cfg.ReconnectDelay = 5 * time.Second
-    }
-    return &UpstreamAdapter{cfg: cfg, sessions: map[net.Conn]*upstreamSession{}, logger: zerolog.Nop()}
+	if cfg.ReconnectDelay == 0 {
+		cfg.ReconnectDelay = 5 * time.Second
+	}
+	return &UpstreamAdapter{cfg: cfg, sessions: map[net.Conn]*upstreamSession{}, logger: zerolog.Nop()}
 }
 
 // SetLogger sets a logger used by the adapter for reconnect/consumer logs.
@@ -288,21 +288,21 @@ func (a *UpstreamAdapter) OnBasicPublish(ctx amqp.ConnContext, channel uint16, e
 
 // OnBasicConsume creates an upstream consumer and forwards messages back to the client.
 func (a *UpstreamAdapter) OnBasicConsume(ctx amqp.ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (string, error) {
-    s := a.getOrCreateSession(ctx.Conn)
-    ch, err := s.getOrCreateChannel(channel)
-    if err != nil {
-        return "", err
-    }
-    // default: noAck = false, exclusive=false, noWait=false
-    upTag := consumerTag
-    if upTag == "" {
-        upTag = fmt.Sprintf("up-%d", time.Now().UnixNano())
-    }
-    sub := &consumerSubscription{queue: queue, upTag: upTag, channel: channel, ctx: ctx}
-    if err := ch.addConsumer(sub); err != nil {
-        return "", err
-    }
-    return upTag, nil
+	s := a.getOrCreateSession(ctx.Conn)
+	ch, err := s.getOrCreateChannel(channel)
+	if err != nil {
+		return "", err
+	}
+	// default: noAck = false, exclusive=false, noWait=false
+	upTag := consumerTag
+	if upTag == "" {
+		upTag = fmt.Sprintf("up-%d", time.Now().UnixNano())
+	}
+	sub := &consumerSubscription{queue: queue, upTag: upTag, channel: channel, ctx: ctx}
+	if err := ch.addConsumer(sub); err != nil {
+		return "", err
+	}
+	return upTag, nil
 }
 
 // OnBasicQos forwards QoS requests to upstream.

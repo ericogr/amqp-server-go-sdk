@@ -10,7 +10,7 @@ all: build
 build:
 	go build ./cmd/server ./cmd/upstream
 
-run:
+run-basic-server:
 	go run ./cmd/server -addr :$(DEFAULT_PORT)
 
 run-upstream:

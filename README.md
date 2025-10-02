@@ -37,17 +37,44 @@ wire-protocol correctness and safe delegation.
 
 Prereqs: Go toolchain and (optionally) `openssl` for `make gen-certs`.
 
-### Build server:
+### Build server
+
+Builds the example server and upstream proxy binaries (`cmd/server` and `cmd/upstream`) using `go build`.
+This produces compiled executables (named `server` and `upstream`) in the repository root so you can run them directly
+without `go run`. Use `make build` when you want a local binary for testing, debugging, or packaging for deployment.
 
 ```bash
-  make build
+make build
 ```
 
-### Run server (plain TCP on 5672):
+### Run server (plain TCP on 5672)
+
+Starts the example server — a minimal in-memory AMQP broker that accepts
+client connections over plain TCP and delegates protocol handling to the
+SDK handlers. The server listens on `:5672` by default and accepts a custom
+address via the `-addr` flag.
+
+Notes:
+
+- `make run-basic-server` (Makefile) starts the server on `:5673` by default to avoid
+  colliding with a locally installed RabbitMQ. Use `make run-basic-server` for a quick
+  demo run.
+- To run the server directly or specify a different address, use:
 
 ```bash
-  make run
+go run ./cmd/server -addr :5672    # run from source (default :5672)
+  ./server -addr :5672               # run built binary
 ```
+
+- TLS: the server will also start a TLS listener on `:5671` if certificate
+  files exist at `tls/server.pem` and `tls/server.key`. Generate test certs
+  with `make gen-certs`.
+- Authentication: the example accepts the PLAIN mechanism with credentials
+  `admin:admin` (see `cmd/server` for the simple auth handler). Replace or
+  remove this in real deployments.
+
+Use this server for local testing, debugging client behavior (QoS, basic.return,
+consumer flows) or exercising the SDK without a full RabbitMQ broker.
 
 ### Run an upstream proxy (delegates to RabbitMQ)
 
@@ -72,7 +99,7 @@ make rabbit-stop    # stop and remove it
 ### Generate self-signed certs (local TLS demo):
 
 ```bash
-  make gen-certs
+make gen-certs
 ```
 
 ### Run TLS server (if certs generated):
@@ -80,25 +107,25 @@ make rabbit-stop    # stop and remove it
 ### server will automatically start TLS listener on :5671 when certs exist
 
 ```bash
-  make run
+make run-basic-server
 ```
 
 ### Publish a message (example):
 
 ```bash
-  make publish
+make publish
 ```
 
 Or run the example publisher with QoS/mandatory flags:
 
 ```go
-  go run ./cmd/publish --addr amqp://guest:guest@127.0.0.1:5672/ --exchange "" --key test --body hello --prefetch-count 10 --mandatory=true
+  go run ./cmd/publish --addr amqp://admin:admin@127.0.0.1:5672/ --exchange "" --key test --body hello --prefetch-count 10 --mandatory=true
 ```
 
 ### Run unit tests:
 
 ```bash
-  make test
+make test
 ```
 
 ## SDK usage (programmatic)
@@ -177,7 +204,7 @@ available again (see proxy logs for reconnect messages).
 - `cmd/server` — example handlers wired to an in-memory broker.
 - `cmd/publish` / `cmd/consume` — example publisher/consumer showing QoS and returns.
 
-See `TODO.md` for a compatibility checklist and outstanding work.
+See [TODO.md](TODO.md) for a compatibility checklist and outstanding work.
 
 ## Contributing
 
