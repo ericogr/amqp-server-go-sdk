@@ -1,88 +1,136 @@
-# Minimal AMQP 0-9-1 Server SDK (Go)
+# AMQP 0-9-1 SDK (Go) — minimal, protocol-focused
 
-This repository contains a minimal, educational implementation of parts of the AMQP 0-9-1
-wire protocol in Go and a tiny example server that accepts `basic.publish` messages.
+This repository provides a minimal, protocol-focused AMQP 0-9-1 SDK in Go plus
+example binaries. The SDK parses AMQP frames/methods, negotiates connection
+parameters and delegates behavioral decisions (queues, routing, persistence)
+to application-provided handlers. It is not a full broker — the SDK's job is
+wire-protocol correctness and safe delegation.
 
-Important: this SDK parses the AMQP wire protocol and provides a delegation model for
-handling high level operations (exchanges, queues, publishes, consumes). It does NOT
-implement a full AMQP broker. Instead, the SDK calls application-provided handlers
-(`ServerHandlers`) through a connection context (`ConnContext`) so that the application
-implements policy and behavior (e.g. queue management, routing, persistence).
+## Key points
+- Protocol-focused: parsing/serializing frames, content headers, field-tables.
+- Delegation model: application supplies `ServerHandlers` (see API below).
+- Structured logging: SDK uses `zerolog`; applications set the logger with
+  `amqp.SetLogger(logger)`.
 
-This design keeps the SDK focused on protocol handling and lets applications (or the
-example server in `cmd/server`) implement the broker semantics they need.
+## Implemented features (high level)
 
-The project is intended as a learning/demo SDK — it is NOT a full AMQP broker and
-should not be used in production.
+ - ✅ Connection negotiation (Start/Tune/Open/Close)
+ - ✅ Content header parsing (properties + `headers` field-table)
+ - ✅ Basic.Publish parsing + delegation to `OnBasicPublish`
+ - ✅ Basic.QoS (prefetch) negotiation + `qos-ok`
+ - ✅ Channel Flow control (flow/flow-ok)
+ - ✅ Heartbeat negotiation and sending
+ - ✅ Basic.Return (publisher returns) and handler callback
 
-Contents
-- `pkg/amqp` - AMQP frame/method helpers and `Serve` helpers. The SDK focuses on parsing
-  and producing frames and delegating behavioral decisions to handlers.
-- `cmd/server` - example server that uses the SDK and provides a minimal default behavior
-  implemented with `ServerHandlers` (in-memory queues) for demo and tests.
-- `cmd/publish` - example publisher that uses the official RabbitMQ Go client
-  (`github.com/rabbitmq/amqp091-go`) to publish a message to the local server.
-- `Makefile` - convenience targets: `build`, `run`, `test`, `publish`, `clean`.
+## Project layout
 
-TLS support
+ - `pkg/amqp` — SDK: frames, method parsing, ServeWithAuth, ConnContext, ServerHandlers.
+ - `cmd/server` — example server using `pkg/amqp` and a simple in-memory broker.
+ - `cmd/publish` — example publisher (uses `github.com/rabbitmq/amqp091-go`) with
+   flags for `--prefetch-count` and `--mandatory` to demonstrate QoS and returns.
+ - `cmd/consume` — example consumer (uses official client) for demo.
 
-- The server can accept TLS connections. If `tls/server.pem` and `tls/server.key`
-  exist the example server will start a TLS listener on `:5671` in addition to the
-  plain TCP listener on `:5672`.
-- Use `make gen-certs` to generate a self-signed certificate pair for local testing.
-- Handlers receive `ConnContext` which now includes `Vhost` and `TLSState` so
-  authentication handlers can inspect the requested virtual-host and the
-  client/server TLS connection state (e.g. client certificates).
+## Quick start
 
-Quick start
+Prereqs: Go toolchain and (optionally) `openssl` for `make gen-certs`.
 
-1. Build (optional):
+### Build server:
 
-   make build
+```bash
+  make build
+```
 
-2. Run the minimal server (default port `:5672`):
+### Run server (plain TCP on 5672):
 
-   make run
+```bash
+  make run
+```
 
-3. In another terminal, publish a test message (the example publisher connects to
-   `amqp://guest:guest@127.0.0.1:5672/` by default):
+### Generate self-signed certs (local TLS demo):
 
-   make publish
+```bash
+  make gen-certs
+```
 
-You should see the published message printed by the server and the publisher should
-exit quickly after receiving the broker handshake responses.
+### Run TLS server (if certs generated):
 
-Tests
+### server will automatically start TLS listener on :5671 when certs exist
 
-Run unit tests with:
+```bash
+  make run
+```
 
-   make test
+### Publish a message (example):
 
-This runs `go test ./... -v` and includes tests that validate frame read/write and a
-publish→ack roundtrip using `net.Pipe`.
+```bash
+  make publish
+```
 
-Using the SDK
+Or run the example publisher with QoS/mandatory flags:
 
-The main helper is `pkg/amqp.Serve(addr string, handler func(channel uint16, body []byte) error)`.
-Example usage in `cmd/server`:
+```go
+  go run ./cmd/publish --addr amqp://guest:guest@127.0.0.1:5672/ --exchange "" --key test --body hello --prefetch-count 10 --mandatory=true
+```
 
-  - start the server: `amqp.Serve(":5672", handler)`
-  - handler receives the channel id and the message body (raw bytes).
+### Run unit tests:
 
-Limitations
+```bash
+  make test
+```
 
-- Implements only the minimal subset of AMQP 0-9-1 to accept `basic.publish`:
-  handshake (Start/Tune/Open), channel open, basic.publish header+body, and basic.ack.
-- No queues, no exchanges, no routing, no persistence, no real authentication/authorization.
-- Limited property parsing and limited error handling. Frame sizes are capped (1MB).
+## SDK usage (programmatic)
 
-Notes
+Set logger (recommended):
 
-- The `cmd/publish` example uses the official RabbitMQ client. It performs a graceful
-  close handshake; the server implements `connection.close` and `channel.close` replies
-  so the client can finish immediately.
-- This project is for experimentation and demonstration only.
+```go
+logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+amqp.SetLogger(logger)
+```
 
-Contributing
+Provide handlers and start server:
 
-Pull requests are welcome. Please keep changes small and focused.
+```go
+handlers := &amqp.ServerHandlers{
+    OnBasicPublish: func(ctx amqp.ConnContext, channel uint16, exchange, rkey string, mandatory, immediate bool, props amqp.BasicProperties, body []byte) (bool, bool, error) {
+        // Decide routing here (application code). Return (routed, nack, err).
+        return false, false, nil
+    },
+    OnBasicQos: func(ctx amqp.ConnContext, channel uint16, prefetchSize uint32, prefetchCount uint16, global bool) error {
+        // Application may adjust consumer behavior.
+        return nil
+    },
+    OnChannelFlow: func(ctx amqp.ConnContext, channel uint16, active bool) (bool, error) {
+        // Return the flow state the server should use.
+        return active, nil
+    },
+    OnBasicReturn: func(ctx amqp.ConnContext, channel uint16, replyCode uint16, replyText, exchange, routingKey string, props amqp.BasicProperties, body []byte) error {
+        // Notification that a published message was returned (mandatory/immediate)
+        return nil
+    },
+}
+
+if err := amqp.ServeWithAuth(":5672", nil, nil, handlers); err != nil {
+    logger.Fatal().Err(err).Msg("server failed")
+}
+```
+
+## Notes and design
+
+- The SDK purposely delegates all broker behavior to handlers so applications can
+  implement storage, routing, and policies (or connect to a real RabbitMQ server).
+- Field-table parsing supports common types; extend `pkg/amqp/encode.go` if you
+  need more field-value types.
+- The example `cmd/server` implements a tiny in-memory broker for demonstration
+  and testing; real deployments should use RabbitMQ or an equivalent broker.
+
+## Where to look next
+
+- `pkg/amqp` — protocol implementation and handler APIs.
+- `cmd/server` — example handlers wired to an in-memory broker.
+- `cmd/publish` / `cmd/consume` — example publisher/consumer showing QoS and returns.
+
+See `TODO.md` for a compatibility checklist and outstanding work.
+
+## Contributing
+
+Contributions welcome; please open issues for discussion before large changes.
