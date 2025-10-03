@@ -6,6 +6,31 @@ parameters and delegates behavioral decisions (queues, routing, persistence)
 to application-provided handlers. It is not a full broker — the SDK's job is
 wire-protocol correctness and safe delegation.
 
+![AMQP SDK logo](doc/logo.svg)
+
+**SDK as Protocol Intermediary**
+
+```mermaid
+graph LR
+  Pub(Publisher App)
+  Con(Consumer App)
+  SDK(AMQP SDK - protocol implementation)
+  H(Handlers / ServerHandlers - customization)
+  Up(Upstream broker or custom backend)
+
+  Pub -->|AMQP frames| SDK
+  Con -->|AMQP frames| SDK
+  SDK -->|parses frames| H
+  H -->|custom logic/routing| SDK
+  SDK -->|optional upstream| Up
+  Up -->|deliveries / confirms| SDK
+```
+
+The diagram shows the SDK sitting between AMQP clients and application logic.
+It implements the AMQP 0-9-1 wire protocol, exposes `ServerHandlers` so
+applications can inject custom behavior (routing, storage, validation), and
+optionally forwards operations to an upstream broker like RabbitMQ.
+
 ## Key points
 - Protocol-focused: parsing/serializing frames, content headers, field-tables.
 - Delegation model: application supplies `ServerHandlers` (see API below).
@@ -188,6 +213,120 @@ to `amqp://...:5673` (the proxy) instead of directly to RabbitMQ.
 If you restart RabbitMQ while the proxy is running the adapter will log the
 disconnect, attempt reconnects, and restore consumers when the upstream is
 available again (see proxy logs for reconnect messages).
+
+## Architecture
+
+```mermaid
+graph LR
+  P(Publisher)
+  S(SDK)
+  UA(Upstream Adapter)
+  R(RabbitMQ)
+  C(Consumer)
+
+  P -->|basic.publish| S
+  S -->|onBasicPublish| UA
+  UA -->|upstream publish| R
+  R -->|deliver| UA
+  UA -->|basic.deliver| S
+  S -->|basic.deliver| C
+  C -->|basic.ack / basic.nack| S
+  S -->|map ack/nack| UA
+  UA -->|upstream ack/nack| R
+```
+
+Explanation
+
+The diagram shows a typical deployment where two AMQP clients (a publisher
+and a consumer) connect to the AMQP SDK acting as a protocol-aware server.
+The SDK implements frame parsing and exposes `ServerHandlers`. The
+`UpstreamAdapter` implements those handlers and maintains a separate upstream
+AMQP connection to a real RabbitMQ broker. Publish and consume operations are
+forwarded: `Basic.Publish` from a client becomes an upstream publish; upstream
+deliveries are translated into `Basic.Deliver` frames and written back to the
+client. Acks, nacks and other control frames are mapped in both directions so
+client acknowledgements affect the upstream broker and upstream confirms are
+propagated back to publishers.
+
+### Example scenario: publisher + consumer via the upstream proxy
+
+Steps to run a minimal demo that shows how the SDK proxies messages to RabbitMQ:
+
+- Start RabbitMQ (local container):
+
+```bash
+make rabbit-start
+```
+
+- Start the upstream proxy (SDK + UpstreamAdapter listening on :5673 by default):
+
+```bash
+make run-upstream
+# or: go run ./cmd/upstream -addr :5673 -upstream amqp://admin:admin@127.0.0.1:5672/
+```
+
+- Start a consumer (connects to the proxy and issues `basic.consume`):
+
+```bash
+make consume
+# or: go run ./cmd/consume --addr amqp://admin:admin@127.0.0.1:5673/ --queue test-queue
+```
+
+- Publish a message (connects to the proxy and issues `basic.publish`):
+
+```bash
+make publish
+# or: go run ./cmd/publish --addr amqp://admin:admin@127.0.0.1:5673/ --exchange "" --key test --body "hello"
+```
+
+What happens (step-by-step):
+
+1. The consumer declares a queue and calls `basic.consume` against the SDK.
+   The `UpstreamAdapter.OnBasicConsume` creates a consumer on the real
+   RabbitMQ instance and registers a mapping between upstream delivery-tags
+   and the client-side delivery-tags.
+2. The publisher sends `basic.publish` to the SDK. The SDK parses the frames
+   and calls `UpstreamAdapter.OnBasicPublish`, which publishes the message on
+   the upstream RabbitMQ connection. If confirm mode is enabled the adapter
+   maps upstream confirms to `basic.ack`/`basic.nack` to the publisher.
+3. RabbitMQ routes the message to the queue and delivers it to the upstream
+   consumer. The adapter receives the upstream delivery and forwards it to
+   the client by writing `basic.deliver` + content header + body frames via
+   the SDK. The client receives the message and processes it.
+4. When the client issues `basic.ack` / `basic.nack` / `basic.reject`, the
+   SDK maps the client delivery-tag back to the upstream delivery-tag and the
+   adapter calls the corresponding upstream method so the broker's state is
+   updated.
+
+Failure handling: the adapter supports configurable failure policies
+(`FailReconnect`, `FailEnqueue`, `FailCloseClient`). For example, with
+`FailEnqueue` the adapter will buffer publishes in memory while RabbitMQ is
+down and drain them on reconnect; `FailReconnect` will try reconnect attempts
+and restore consumers when the broker becomes available again.
+
+Quick wiring example (programmatic)
+
+```go
+import (
+  "log"
+  "github.com/ericogr/amqp-test/pkg/amqp"
+  "github.com/ericogr/amqp-test/pkg/amqp/upstream"
+)
+
+cfg := upstream.UpstreamConfig{URL: "amqp://admin:admin@127.0.0.1:5672/", FailurePolicy: upstream.FailReconnect}
+adapter := upstream.NewUpstreamAdapter(cfg)
+handlers := adapter.Handlers()
+
+go func() {
+  if err := amqp.ServeWithAuth(":5673", nil, adapter.AuthHandler, handlers); err != nil {
+    log.Fatal(err)
+  }
+}()
+```
+
+The adapter and SDK together let application developers intercept, inspect
+or modify AMQP operations while keeping compatibility with RabbitMQ and the
+AMQP 0-9-1 protocol.
 
 ## Notes and design
 
