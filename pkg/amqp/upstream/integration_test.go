@@ -38,7 +38,7 @@ func TestIntegration_UpstreamBasic(t *testing.T) {
 	}
 
 	// verify upstream session exists and can declare/publish/get
-	s := a.getOrCreateSession(serverConn)
+	s := a.getOrCreateSession(amppkg.ConnContext{Conn: serverConn})
 	ch, err := s.getOrCreateChannel(1)
 	if err != nil {
 		t.Fatalf("getOrCreateChannel: %v", err)

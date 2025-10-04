@@ -137,16 +137,20 @@ func WriteFrame(w io.Writer, f Frame) error {
 	hdr[0] = f.Type
 	binary.BigEndian.PutUint16(hdr[1:3], f.Channel)
 	binary.BigEndian.PutUint32(hdr[3:7], uint32(len(f.Payload)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
+	// assemble full frame into a single buffer and write once to avoid
+	// interleaving writes from callers that might not serialize correctly.
+	totalLen := 7 + len(f.Payload) + 1
+	buf := make([]byte, totalLen)
+	buf[0] = f.Type
+	binary.BigEndian.PutUint16(buf[1:3], f.Channel)
+	binary.BigEndian.PutUint32(buf[3:7], uint32(len(f.Payload)))
 	if len(f.Payload) > 0 {
-		if _, err := w.Write(f.Payload); err != nil {
-			return err
-		}
+		copy(buf[7:7+len(f.Payload)], f.Payload)
 	}
-	// frame end
-	if _, err := w.Write([]byte{frameEnd}); err != nil {
+	buf[totalLen-1] = frameEnd
+	// log outgoing frame for debugging
+	logger.Debug().Uint16("channel", f.Channel).Int("type", int(f.Type)).Int("size", len(f.Payload)).Msg("write frame")
+	if _, err := w.Write(buf); err != nil {
 		return err
 	}
 	return nil
@@ -158,6 +162,7 @@ func WriteMethod(w io.Writer, channel uint16, classID, methodID uint16, args []b
 	binary.BigEndian.PutUint16(payload[0:2], classID)
 	binary.BigEndian.PutUint16(payload[2:4], methodID)
 	copy(payload[4:], args)
+	logger.Debug().Uint16("channel", channel).Uint16("class", classID).Uint16("method", methodID).Int("args_len", len(args)).Msg("write method")
 	return WriteFrame(w, Frame{Type: frameMethod, Channel: channel, Payload: payload})
 }
 

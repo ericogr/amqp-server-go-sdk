@@ -17,6 +17,7 @@ import (
 
 type upstreamSession struct {
 	clientConn   net.Conn
+	clientCtx    amqp.ConnContext
 	upstreamConn *amqp091.Connection
 	mu           sync.Mutex
 	channels     map[uint16]*upstreamChannel
@@ -32,6 +33,10 @@ type upstreamSession struct {
 	closed bool
 	// logger copied from adapter for session-level logs
 	logger zerolog.Logger
+	// connection in-progress singleflight
+	connecting    bool
+	connectWaitCh chan struct{}
+	connectErr    error
 }
 
 type upstreamChannel struct {
@@ -46,6 +51,10 @@ type upstreamChannel struct {
 	consumers map[string]*consumerSubscription
 	// logger copied from session for convenience
 	logger zerolog.Logger
+	// When true the monitor should not attempt to reconnect the upstream
+	// automatically (used when we intentionally closed the upstream
+	// connection because there are no active client channels).
+	suppressReconnect bool
 }
 
 type enqueuedMsg struct {
@@ -56,13 +65,16 @@ type enqueuedMsg struct {
 	when     time.Time
 }
 
-func (a *UpstreamAdapter) getOrCreateSession(conn net.Conn) *upstreamSession {
+func (a *UpstreamAdapter) getOrCreateSession(ctx amqp.ConnContext) *upstreamSession {
+	conn := ctx.Conn
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if s, ok := a.sessions[conn]; ok {
+		// update the stored conn context so we have the latest write helpers
+		s.clientCtx = ctx
 		return s
 	}
-	s := &upstreamSession{clientConn: conn, channels: map[uint16]*upstreamChannel{}, logger: a.logger}
+	s := &upstreamSession{clientConn: conn, clientCtx: ctx, channels: map[uint16]*upstreamChannel{}, logger: a.logger}
 	a.sessions[conn] = s
 	return s
 }
@@ -190,15 +202,40 @@ func buildDialURL(rawURL, user, pass string) (string, error) {
 }
 
 func (s *upstreamSession) connectUpstream(cfg UpstreamConfig, user, pass string) error {
-	s.mu.Lock()
 	// store cfg and credentials for reconnect
+	s.mu.Lock()
 	s.cfg = cfg
 	s.upUser = user
 	s.upPass = pass
+	// if already connected, nothing to do
+	if s.upstreamConn != nil {
+		s.mu.Unlock()
+		return nil
+	}
+	// singleflight: if another goroutine is connecting, wait for it
+	if s.connecting {
+		ch := s.connectWaitCh
+		s.mu.Unlock()
+		<-ch
+		s.mu.Lock()
+		err := s.connectErr
+		s.mu.Unlock()
+		return err
+	}
+	// mark connecting and create wait channel
+	s.connecting = true
+	s.connectWaitCh = make(chan struct{})
+	s.connectErr = nil
 	s.mu.Unlock()
 
 	dialURL, err := buildDialURL(cfg.URL, user, pass)
 	if err != nil {
+		s.mu.Lock()
+		s.connectErr = err
+		close(s.connectWaitCh)
+		s.connecting = false
+		s.connectWaitCh = nil
+		s.mu.Unlock()
 		return err
 	}
 
@@ -212,12 +249,35 @@ func (s *upstreamSession) connectUpstream(cfg UpstreamConfig, user, pass string)
 	} else {
 		conn, err = amqp091.Dial(dialURL)
 	}
+
+	s.mu.Lock()
+	// if session was closed while dialing, discard connection
+	if s.closed {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		s.connectErr = fmt.Errorf("session closed")
+		close(s.connectWaitCh)
+		s.connecting = false
+		s.connectWaitCh = nil
+		s.mu.Unlock()
+		return s.connectErr
+	}
 	if err != nil {
+		s.connectErr = err
+		close(s.connectWaitCh)
+		s.connecting = false
+		s.connectWaitCh = nil
+		s.mu.Unlock()
 		return err
 	}
 
-	s.mu.Lock()
 	s.upstreamConn = conn
+	// clear connect state and notify waiters
+	s.connectErr = nil
+	close(s.connectWaitCh)
+	s.connecting = false
+	s.connectWaitCh = nil
 	s.mu.Unlock()
 
 	// start monitor goroutine for reconnects
@@ -272,9 +332,22 @@ func (s *upstreamSession) monitorUpstream() {
 	// policy handling
 	switch cfg.FailurePolicy {
 	case FailCloseClient:
-		// close client connection
-		if err := client.Close(); err != nil {
-			s.logger.Error().Err(err).Msg("failed to close client after upstream connection closed")
+		// notify client with an AMQP Connection.Close instead of abruptly
+		// closing the TCP socket. This lets the client receive an AMQP
+		// exception (Connection.Close) and respond with Close-Ok.
+		if s.clientCtx.Conn != nil && s.clientCtx.WriteMethod != nil {
+			if err := amqp.SendConnectionClose(s.clientCtx, 320, fmt.Sprintf("upstream connection closed: %v", errInfo), 0, 0); err != nil {
+				s.logger.Error().Err(err).Msg("failed to send connection.close to client")
+			}
+			// do not close the client socket here; allow the connection handler
+			// goroutine to observe the Close-Ok and shut down gracefully.
+		} else {
+			// fallback: close client connection immediately
+			if client != nil {
+				if err := client.Close(); err != nil {
+					s.logger.Error().Err(err).Msg("failed to close client after upstream connection closed")
+				}
+			}
 		}
 		return
 	case FailReconnect:
@@ -399,19 +472,41 @@ func (s *upstreamSession) drainEnqueued() {
 }
 
 func (s *upstreamSession) getOrCreateChannel(clientChan uint16) (*upstreamChannel, error) {
+	// Fast-path: if channel exists return it.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if c, ok := s.channels[clientChan]; ok {
+		s.mu.Unlock()
 		return c, nil
 	}
+	// If there is no upstream connection try to connect synchronously using
+	// stored credentials; unlock before dialing to avoid deadlock.
 	if s.upstreamConn == nil {
+		cfg := s.cfg
+		user := s.upUser
+		pass := s.upPass
+		s.mu.Unlock()
+		if err := s.connectUpstream(cfg, user, pass); err != nil {
+			return nil, err
+		}
+		// re-acquire lock and check again
+		s.mu.Lock()
+		if c, ok := s.channels[clientChan]; ok {
+			s.mu.Unlock()
+			return c, nil
+		}
+	}
+	// create an upstream channel
+	if s.upstreamConn == nil {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("no upstream connection")
 	}
 	upch, err := s.upstreamConn.Channel()
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 	c := &upstreamChannel{upstreamCh: upch, clientToUpstream: map[uint64]uint64{}, upstreamToClient: map[uint64]uint64{}, nextClientTag: 1, logger: s.logger}
 	s.channels[clientChan] = c
+	s.mu.Unlock()
 	return c, nil
 }

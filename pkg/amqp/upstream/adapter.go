@@ -90,6 +90,7 @@ func (a *UpstreamAdapter) Handlers() *amqp.ServerHandlers {
 		OnBasicQos:        a.OnBasicQos,
 		OnBasicReturn:     a.OnBasicReturn,
 		OnChannelFlow:     a.OnChannelFlow,
+		OnChannelClose:    a.OnChannelClose,
 		OnConnClose:       a.OnConnClose,
 	}
 }
@@ -131,6 +132,39 @@ func (a *UpstreamAdapter) OnConnClose(ctx amqp.ConnContext) {
 	s.mu.Unlock()
 }
 
+// OnChannelClose is invoked when the client closes an AMQP channel. The
+// adapter should close the corresponding upstream channel and, if there are
+// no more channels, optionally close the upstream connection.
+func (a *UpstreamAdapter) OnChannelClose(ctx amqp.ConnContext, channel uint16) error {
+	if ctx.Conn == nil {
+		return nil
+	}
+	s := a.getOrCreateSession(ctx)
+	s.mu.Lock()
+	ch, ok := s.channels[channel]
+	if !ok {
+		s.mu.Unlock()
+		return nil
+	}
+	// close upstream channel if present
+	if ch.upstreamCh != nil {
+		if err := ch.upstreamCh.Close(); err != nil {
+			a.logger.Error().Err(err).Uint16("client_channel", channel).Msg("failed to close upstream channel")
+		}
+		ch.upstreamCh = nil
+	}
+	delete(s.channels, channel)
+	// if no more channels, close upstream connection to avoid lingering
+	if len(s.channels) == 0 && s.upstreamConn != nil {
+		if err := s.upstreamConn.Close(); err != nil {
+			a.logger.Error().Err(err).Msg("failed to close upstream connection after channel close")
+		}
+		s.upstreamConn = nil
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 // AuthHandler implements amqp.AuthHandler. It is intended to be passed to
 // `amqp.ServeWithAuth`. The adapter will, by default, accept credentials and
 // open an upstream connection for the client using those credentials (or the
@@ -170,11 +204,23 @@ func (a *UpstreamAdapter) AuthHandler(ctx amqp.ConnContext, mechanism string, re
 		}
 	}
 
-	// create session and connect upstream using chosen credentials
-	s := a.getOrCreateSession(ctx.Conn)
-	if err := s.connectUpstream(a.cfg, user, pass); err != nil {
-		return fmt.Errorf("upstream connection failed: %w", err)
-	}
+	// create session and start connecting upstream using chosen credentials.
+	// Use an asynchronous connect so the client handshake does not fail when
+	// the upstream is temporarily unavailable; operations will apply the
+	// configured failure policy (enqueue/reconnect/close).
+	s := a.getOrCreateSession(ctx)
+	// store intended upstream credentials on the session so other code can
+	// attempt synchronous connect if needed.
+	s.mu.Lock()
+	s.upUser = user
+	s.upPass = pass
+	s.cfg = a.cfg
+	s.mu.Unlock()
+	go func() {
+		if err := s.connectUpstream(a.cfg, user, pass); err != nil {
+			a.logger.Warn().Err(err).Msg("async upstream connection failed")
+		}
+	}()
 	return nil
 }
 
@@ -189,7 +235,7 @@ func (a *UpstreamAdapter) OnBasicPublish(ctx amqp.ConnContext, channel uint16, e
 		}
 	}
 
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		// no upstream channel available
@@ -301,7 +347,7 @@ func (a *UpstreamAdapter) OnBasicPublish(ctx amqp.ConnContext, channel uint16, e
 
 // OnBasicConsume creates an upstream consumer and forwards messages back to the client.
 func (a *UpstreamAdapter) OnBasicConsume(ctx amqp.ConnContext, channel uint16, queue, consumerTag string, flags byte, args []byte) (string, error) {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return "", err
@@ -320,7 +366,7 @@ func (a *UpstreamAdapter) OnBasicConsume(ctx amqp.ConnContext, channel uint16, q
 
 // OnBasicQos forwards QoS requests to upstream.
 func (a *UpstreamAdapter) OnBasicQos(ctx amqp.ConnContext, channel uint16, prefetchSize uint32, prefetchCount uint16, global bool) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -330,7 +376,7 @@ func (a *UpstreamAdapter) OnBasicQos(ctx amqp.ConnContext, channel uint16, prefe
 
 // OnChannelFlow forwards flow control requests to upstream.
 func (a *UpstreamAdapter) OnChannelFlow(ctx amqp.ConnContext, channel uint16, active bool) (bool, error) {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return false, err
@@ -347,7 +393,7 @@ func (a *UpstreamAdapter) OnBasicReturn(ctx amqp.ConnContext, channel uint16, re
 
 // OnBasicGet attempts to fetch a message from upstream.
 func (a *UpstreamAdapter) OnBasicGet(ctx amqp.ConnContext, channel uint16, queue string, noAck bool) (bool, uint64, []byte, error) {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return false, 0, nil, err
@@ -371,7 +417,7 @@ func (a *UpstreamAdapter) OnBasicGet(ctx amqp.ConnContext, channel uint16, queue
 
 // OnBasicAck forwards consumer acks to upstream (simple implementation).
 func (a *UpstreamAdapter) OnBasicAck(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -388,7 +434,7 @@ func (a *UpstreamAdapter) OnBasicAck(ctx amqp.ConnContext, channel uint16, deliv
 
 // OnBasicNack forwards consumer nacks to upstream.
 func (a *UpstreamAdapter) OnBasicNack(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, multiple bool, requeue bool) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -404,7 +450,7 @@ func (a *UpstreamAdapter) OnBasicNack(ctx amqp.ConnContext, channel uint16, deli
 
 // OnBasicReject forwards basic.reject to upstream (similar to nack with single)
 func (a *UpstreamAdapter) OnBasicReject(ctx amqp.ConnContext, channel uint16, deliveryTag uint64, requeue bool) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -420,7 +466,7 @@ func (a *UpstreamAdapter) OnBasicReject(ctx amqp.ConnContext, channel uint16, de
 
 // Exchange/Queue operations: basic forwarding to upstream using reasonable defaults.
 func (a *UpstreamAdapter) OnExchangeDeclare(ctx amqp.ConnContext, channel uint16, exchange, kind string, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -430,7 +476,7 @@ func (a *UpstreamAdapter) OnExchangeDeclare(ctx amqp.ConnContext, channel uint16
 }
 
 func (a *UpstreamAdapter) OnExchangeDelete(ctx amqp.ConnContext, channel uint16, exchange string, ifUnused bool, nowait bool, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -439,7 +485,7 @@ func (a *UpstreamAdapter) OnExchangeDelete(ctx amqp.ConnContext, channel uint16,
 }
 
 func (a *UpstreamAdapter) OnExchangeBind(ctx amqp.ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -448,7 +494,7 @@ func (a *UpstreamAdapter) OnExchangeBind(ctx amqp.ConnContext, channel uint16, d
 }
 
 func (a *UpstreamAdapter) OnExchangeUnbind(ctx amqp.ConnContext, channel uint16, destination, source, routingKey string, nowait bool, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -457,7 +503,7 @@ func (a *UpstreamAdapter) OnExchangeUnbind(ctx amqp.ConnContext, channel uint16,
 }
 
 func (a *UpstreamAdapter) OnQueueDeclare(ctx amqp.ConnContext, channel uint16, queue string, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -467,7 +513,7 @@ func (a *UpstreamAdapter) OnQueueDeclare(ctx amqp.ConnContext, channel uint16, q
 }
 
 func (a *UpstreamAdapter) OnQueueDelete(ctx amqp.ConnContext, channel uint16, queue string, ifUnused bool, ifEmpty bool, nowait bool, args []byte) (int, error) {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return 0, err
@@ -477,7 +523,7 @@ func (a *UpstreamAdapter) OnQueueDelete(ctx amqp.ConnContext, channel uint16, qu
 }
 
 func (a *UpstreamAdapter) OnQueuePurge(ctx amqp.ConnContext, channel uint16, queue string, args []byte) (int, error) {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return 0, err
@@ -487,7 +533,7 @@ func (a *UpstreamAdapter) OnQueuePurge(ctx amqp.ConnContext, channel uint16, que
 }
 
 func (a *UpstreamAdapter) OnQueueBind(ctx amqp.ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
@@ -496,7 +542,7 @@ func (a *UpstreamAdapter) OnQueueBind(ctx amqp.ConnContext, channel uint16, queu
 }
 
 func (a *UpstreamAdapter) OnQueueUnbind(ctx amqp.ConnContext, channel uint16, queue, exchange, rkey string, args []byte) error {
-	s := a.getOrCreateSession(ctx.Conn)
+	s := a.getOrCreateSession(ctx)
 	ch, err := s.getOrCreateChannel(channel)
 	if err != nil {
 		return err
