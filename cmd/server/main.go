@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ericogr/amqp-test/pkg/amqp"
+	"github.com/ericogr/go-amqp-server-sdk/pkg/amqp"
 	"github.com/rs/zerolog"
 )
 

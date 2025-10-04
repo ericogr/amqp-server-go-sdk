@@ -9,7 +9,7 @@ import (
 	"os"
 	"testing"
 
-	amppkg "github.com/ericogr/amqp-test/pkg/amqp"
+	amppkg "github.com/ericogr/go-amqp-server-sdk/pkg/amqp"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 

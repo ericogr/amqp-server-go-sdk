@@ -1,4 +1,4 @@
-module github.com/ericogr/amqp-test
+module github.com/ericogr/go-amqp-server-sdk
 
 go 1.25.0
 

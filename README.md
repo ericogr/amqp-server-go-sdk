@@ -309,8 +309,8 @@ Quick wiring example (programmatic)
 ```go
 import (
   "log"
-  "github.com/ericogr/amqp-test/pkg/amqp"
-  "github.com/ericogr/amqp-test/pkg/amqp/upstream"
+  "github.com/ericogr/go-amqp-server-sdk/pkg/amqp"
+  "github.com/ericogr/go-amqp-server-sdk/pkg/amqp/upstream"
 )
 
 cfg := upstream.UpstreamConfig{URL: "amqp://admin:admin@127.0.0.1:5672/", FailurePolicy: upstream.FailReconnect}

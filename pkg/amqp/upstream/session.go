@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	amqp "github.com/ericogr/amqp-test/pkg/amqp"
+	amqp "github.com/ericogr/go-amqp-server-sdk/pkg/amqp"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/rs/zerolog"
 )

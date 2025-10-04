@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	amqp "github.com/ericogr/amqp-test/pkg/amqp"
-	"github.com/ericogr/amqp-test/pkg/amqp/upstream"
+	amqp "github.com/ericogr/go-amqp-server-sdk/pkg/amqp"
+	"github.com/ericogr/go-amqp-server-sdk/pkg/amqp/upstream"
 	"github.com/rs/zerolog"
 )
 
