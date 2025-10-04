@@ -37,6 +37,14 @@ type upstreamSession struct {
 	connecting    bool
 	connectWaitCh chan struct{}
 	connectErr    error
+	// When true the monitor should not attempt to reconnect the upstream
+	// automatically (used when we intentionally closed the upstream
+	// connection because there are no active client channels).
+	suppressReconnect bool
+	// idleTimer schedules closing the upstream connection when there are no
+	// active client channels for a short idle period. This avoids churn for
+	// bursty publishers that open/close channels rapidly.
+	idleTimer *time.Timer
 }
 
 type upstreamChannel struct {
@@ -51,10 +59,6 @@ type upstreamChannel struct {
 	consumers map[string]*consumerSubscription
 	// logger copied from session for convenience
 	logger zerolog.Logger
-	// When true the monitor should not attempt to reconnect the upstream
-	// automatically (used when we intentionally closed the upstream
-	// connection because there are no active client channels).
-	suppressReconnect bool
 }
 
 type enqueuedMsg struct {
@@ -273,6 +277,9 @@ func (s *upstreamSession) connectUpstream(cfg UpstreamConfig, user, pass string)
 	}
 
 	s.upstreamConn = conn
+	// we successfully connected; clear any suppress flag so monitor may
+	// act normally if upstream later disconnects
+	s.suppressReconnect = false
 	// clear connect state and notify waiters
 	s.connectErr = nil
 	close(s.connectWaitCh)
@@ -313,6 +320,12 @@ func (s *upstreamSession) monitorUpstream() {
 	s.logger.Info().Err(errInfo).Msg("upstream connection closed")
 	s.mu.Lock()
 	s.upstreamConn = nil
+	if s.suppressReconnect {
+		// caller intentionally closed upstream and asked to suppress reconnect
+		s.suppressReconnect = false
+		s.mu.Unlock()
+		return
+	}
 	// mark channels upstreamCh nil
 	for _, c := range s.channels {
 		c.upstreamCh = nil
@@ -478,6 +491,12 @@ func (s *upstreamSession) getOrCreateChannel(clientChan uint16) (*upstreamChanne
 		s.mu.Unlock()
 		return c, nil
 	}
+	// Cancel any scheduled idle-close since a new channel is being created.
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+
 	// If there is no upstream connection try to connect synchronously using
 	// stored credentials; unlock before dialing to avoid deadlock.
 	if s.upstreamConn == nil {

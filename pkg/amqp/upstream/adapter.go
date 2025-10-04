@@ -156,10 +156,27 @@ func (a *UpstreamAdapter) OnChannelClose(ctx amqp.ConnContext, channel uint16) e
 	delete(s.channels, channel)
 	// if no more channels, close upstream connection to avoid lingering
 	if len(s.channels) == 0 && s.upstreamConn != nil {
-		if err := s.upstreamConn.Close(); err != nil {
-			a.logger.Error().Err(err).Msg("failed to close upstream connection after channel close")
+		// schedule idle-close instead of closing immediately to avoid churn
+		// for bursty publishers. Use the session reconnect delay as idle
+		// timeout.
+		idle := s.cfg.ReconnectDelay
+		if idle == 0 {
+			idle = 5 * time.Second
 		}
-		s.upstreamConn = nil
+		if s.idleTimer == nil {
+			s.idleTimer = time.AfterFunc(idle, func() {
+				s.mu.Lock()
+				// only close if still no channels and upstream exists
+				if len(s.channels) == 0 && s.upstreamConn != nil {
+					s.suppressReconnect = true
+					_ = s.upstreamConn.Close()
+					s.upstreamConn = nil
+					s.logger.Info().Msg("idle upstream connection closed")
+				}
+				s.idleTimer = nil
+				s.mu.Unlock()
+			})
+		}
 	}
 	s.mu.Unlock()
 	return nil
